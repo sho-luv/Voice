@@ -1,0 +1,6 @@
+# Compiled binary
+VoiceMic
+VoiceMic.app/
+
+# macOS
+.DS_Store
