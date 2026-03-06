@@ -1,99 +1,117 @@
 # Voice
 
-A macOS menu bar app that turns speech into text using local transcription. Hold the **fn key** to record, release to transcribe -- text is injected directly into the active text field. Works in terminals, browsers, editors, and any app.
+**Local speech-to-text for macOS. Hold fn, speak, release. Text appears wherever your cursor is.**
 
-Inspired by [Wispr Flow](https://wispr.com), but fully local. Everything runs via [whisper.cpp](https://github.com/ggerganov/whisper.cpp) and optionally [Ollama](https://ollama.ai) for AI cleanup. No cloud APIs, no network calls, no subscription.
+Voice is a lightweight menu bar app that replaces cloud-based dictation with fast, private, local transcription. It works everywhere -- terminals, browsers, editors, chat apps -- without sending a single byte off your machine.
 
-## How It Works
+Built with [whisper.cpp](https://github.com/ggerganov/whisper.cpp) for transcription and optionally [Ollama](https://ollama.ai) for AI-powered text cleanup. Inspired by [Wispr Flow](https://wispr.com).
 
-| Action | What Happens |
-|--------|-------------|
-| **Hold fn** | Push-to-talk: records while held, transcribes on release |
-| **Space+fn** | POPO mode: locks dictation on, tap fn again to stop |
-| **Escape** | Cancel current recording |
-| **Paste Last** | Re-insert last transcription (menu bar option) |
+---
 
-A floating overlay appears at the top of the screen showing the current state:
-
-| Overlay | State |
-|---------|-------|
-| Pulsing red dot | Recording (push-to-talk) |
-| Pulsing blue dot | POPO mode (continuous) |
-| Hourglass | Transcribing |
-| Checkmark + preview | Done (auto-dismisses) |
-| X + message | Error (auto-dismisses) |
-
-The menu bar icon is a secondary indicator (microphone = idle, red = recording, blue = POPO, hourglass = transcribing).
-
-### Text Injection
-
-Voice uses two strategies to insert text into the active app:
-
-- **Accessibility API** -- direct text injection for apps with editable text fields (browsers, editors, etc.)
-- **Clipboard paste** -- for terminal apps (iTerm2, Terminal, Alacritty, WezTerm, Kitty, Warp, Hyper) where AX injection silently fails. Uses delayed clipboard rendering via `NSPasteboardItemDataProvider` and simulated Cmd+V with the event tap temporarily disabled to prevent self-interception. Original clipboard contents are saved and restored after 500ms.
-
-Terminal apps are auto-detected by bundle ID -- no configuration needed.
-
-### AI Cleanup (Optional)
-
-If [Ollama](https://ollama.ai) is running locally with `llama3.2:3b`, Voice automatically cleans up transcription:
-- Removes filler words (um, uh, like, you know)
-- Fixes grammar and punctuation
-- Handles mid-sentence corrections ("scratch that", "no wait")
-- Adapts tone based on the active app (professional for Mail, casual for Messages, technical for Terminal/Xcode)
-
-If Ollama is not running, raw whisper output is used -- no crash, no error.
-
-## Install
+## Quick Start
 
 ```bash
-git clone git@github.com:sho-luv/Voice.git
+git clone https://github.com/sho-luv/Voice.git
 cd Voice
 ./install.sh
 ```
 
-The installer handles:
-- Installing `whisper-cpp` and `sox` via Homebrew
-- Downloading the Whisper `small.en` model (465 MB)
-- Compiling the Swift app
-- Setting up a LaunchAgent (starts on login)
-- Launching the app
+That's it. The installer takes care of dependencies, model download, compilation, and auto-start on login. On first launch macOS will ask for two permissions -- grant both:
 
-On first use, macOS will prompt for **Accessibility** and **Microphone** permissions -- grant both.
+1. **Accessibility** -- needed to detect the fn key and inject text
+2. **Microphone** -- needed to record audio
+
+## Usage
+
+| Shortcut | Action |
+|----------|--------|
+| **Hold fn** | Push-to-talk. Records while held, transcribes on release. |
+| **Space + fn** | POPO mode. Locks recording on for hands-free dictation. Tap fn again to stop. |
+| **Escape** | Cancel the current recording. |
+
+A floating overlay at the top of the screen shows what's happening:
+
+| Indicator | Meaning |
+|-----------|---------|
+| Pulsing red dot | Recording |
+| Pulsing blue dot | POPO mode (continuous) |
+| Hourglass | Transcribing |
+| Checkmark + text preview | Done |
+| X + error message | Something went wrong |
+
+The menu bar icon also reflects the current state. Click it for options including **Paste Last** to re-insert the most recent transcription.
+
+## How Text Gets Inserted
+
+Voice automatically picks the best method for the active app:
+
+- **Most apps** (browsers, editors, chat) -- text is injected directly via the macOS Accessibility API. Instant, no clipboard involvement.
+- **Terminal apps** (iTerm2, Terminal, Alacritty, WezTerm, Kitty, Warp, Hyper) -- uses clipboard paste with simulated Cmd+V. Your original clipboard is saved beforehand and restored after 500ms.
+
+This happens automatically. No configuration needed.
+
+## AI Text Cleanup (Optional)
+
+If [Ollama](https://ollama.ai) is running locally with `llama3.2:3b`, Voice cleans up the raw transcription before inserting it:
+
+- Strips filler words (um, uh, like, you know, basically)
+- Fixes grammar and punctuation
+- Handles corrections ("scratch that", "no wait" -- keeps only the final version)
+- Adapts tone to context (professional in Mail, casual in Messages, technical in Terminal)
+
+To enable: install Ollama and run `ollama pull llama3.2:3b`. Voice checks for it on launch -- if it's not there, raw whisper output is used with no errors.
 
 ## Requirements
 
-- macOS (Apple Silicon or Intel)
+- macOS on Apple Silicon or Intel
 - [Homebrew](https://brew.sh)
 - Xcode Command Line Tools (`xcode-select --install`)
-- Optional: [Ollama](https://ollama.ai) with `llama3.2:3b` for AI text cleanup
 
-## Build Manually
+The installer will handle `whisper-cpp`, `sox`, and the whisper model automatically.
+
+## Manual Build
+
+If you prefer to build without the installer:
 
 ```bash
+# Install dependencies
+brew install whisper-cpp sox
+
+# Download the model (465 MB)
+mkdir -p ~/.local/share/whisper-models
+curl -L -o ~/.local/share/whisper-models/ggml-small.en.bin \
+    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
+
+# Compile
 swiftc -O -o Voice Voice.swift \
     -framework Cocoa -framework ApplicationServices -framework UserNotifications
+
+# Run
+./Voice
 ```
 
-## How It Works (Technical)
+## Troubleshooting
 
-Voice intercepts the fn key via `CGEvent.tapCreate` with a `.defaultTap` event tap. The fn keypress is swallowed (returns nil) to prevent the macOS emoji picker from opening. Recording uses `sox`'s `rec` command at 16kHz mono, transcription uses `whisper-cli`.
+**fn key does nothing**
+- Check System Settings > Privacy & Security > Accessibility -- Voice must be listed and enabled
+- If another app uses fn as a hotkey (e.g., Wispr Flow), close it or reassign the key
+- After recompiling, you may need to toggle the Accessibility permission off and on
 
-For clipboard paste in terminals, the approach mirrors [Wispr Flow](https://wispr.com)'s architecture:
-1. Save current clipboard contents (all pasteboard types)
-2. Register a `NSPasteboardItemDataProvider` for delayed rendering
-3. Temporarily disable the CGEventTap
-4. Post Cmd+V via `CGEventPost` to `.cghidEventTap`
-5. Target app reads clipboard, triggering the data provider callback
-6. Re-enable event tap after 100ms
-7. Restore original clipboard after 500ms
+**Text doesn't appear in my app**
+- For terminals: Voice uses clipboard Cmd+V. If paste is disabled in your terminal settings, enable it
+- For other apps: the Accessibility API is used. Make sure the app has an active text field focused
+
+**Ollama cleanup not working**
+- Confirm Ollama is running: `curl http://localhost:11434/api/tags`
+- Confirm the model is pulled: `ollama list` should show `llama3.2:3b`
+- Voice falls back to raw transcription silently if Ollama is unavailable
 
 ## Uninstall
 
 ```bash
 pkill Voice
 rm ~/Library/LaunchAgents/com.local.voice.plist
-# Optionally remove the model:
+# Optionally remove the whisper model:
 rm ~/.local/share/whisper-models/ggml-small.en.bin
 ```
 
