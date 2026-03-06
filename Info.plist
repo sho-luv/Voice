@@ -3,20 +3,20 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>VoiceMic</string>
+    <string>Voice</string>
     <key>CFBundleIdentifier</key>
-    <string>com.local.voicemic</string>
+    <string>com.local.voice</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>3.0</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>3.0</string>
     <key>CFBundleExecutable</key>
-    <string>VoiceMic</string>
+    <string>Voice</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>VoiceMic needs microphone access to record speech for transcription.</string>
+    <string>Voice needs microphone access to record speech for transcription.</string>
 </dict>
 </plist>

@@ -1,26 +1,42 @@
 # Voice
 
-A macOS menu bar app that turns speech into text using local transcription. Press a hotkey, speak, press it again -- transcribed text lands on your clipboard.
+A macOS menu bar app that turns speech into text using local transcription. Hold the **fn key** to record, release to transcribe -- text is injected directly into the active text field.
 
-Everything runs locally via [whisper.cpp](https://github.com/ggerganov/whisper.cpp). No cloud APIs, no network calls.
+Everything runs locally via [whisper.cpp](https://github.com/ggerganov/whisper.cpp) and optionally [Ollama](https://ollama.ai) for AI cleanup. No cloud APIs, no network calls.
 
 ## How It Works
 
-1. Press **Cmd+L** (global hotkey, works from any app)
-2. Speak
-3. Press **Cmd+L** again to stop
-4. Text is transcribed and copied to your clipboard
-5. **Cmd+V** to paste anywhere
+| Action | What Happens |
+|--------|-------------|
+| **Hold fn** | Push-to-talk: records while held, transcribes on release |
+| **Space+fn** | POPO mode: locks dictation on, tap fn again to stop |
+| **Escape** | Cancel current recording |
 
-The menu bar icon shows the current state:
+A floating overlay appears at the top of the screen showing the current state:
 
-| Icon | State |
-|------|-------|
-| 🎙 | Idle -- ready to record |
-| 🔴 | Recording |
-| ⏳ | Transcribing |
+| Overlay | State |
+|---------|-------|
+| Pulsing red dot | Recording (push-to-talk) |
+| Pulsing blue dot | POPO mode (continuous) |
+| Hourglass | Transcribing |
+| Checkmark + preview | Done (auto-dismisses) |
+| X + message | Error (auto-dismisses) |
 
-Audio cues play on start (Tink), stop (Pop), and completion (Glass).
+The menu bar icon is a secondary indicator (microphone = idle, red = recording, blue = POPO, hourglass = transcribing).
+
+### Text Injection
+
+Transcribed text is injected directly into the focused text field via the Accessibility API. If AX injection fails (e.g., the app doesn't support it), Voice falls back to clipboard paste (Cmd+V) and restores the original clipboard contents.
+
+### AI Cleanup (Optional)
+
+If [Ollama](https://ollama.ai) is running locally with `llama3.2:3b`, Voice automatically cleans up transcription:
+- Removes filler words (um, uh, like, you know)
+- Fixes grammar and punctuation
+- Handles mid-sentence corrections
+- Adapts tone based on the active app (professional for Mail, casual for Messages, etc.)
+
+If Ollama is not running, raw whisper output is used -- no crash, no error.
 
 ## Install
 
@@ -37,23 +53,20 @@ The installer handles:
 - Setting up a LaunchAgent (starts on login)
 - Launching the app
 
-On first use, macOS will prompt for **microphone permission** -- grant it.
+On first use, macOS will prompt for **Accessibility** and **Microphone** permissions -- grant both.
 
 ## Requirements
 
 - macOS (Apple Silicon or Intel)
 - [Homebrew](https://brew.sh)
 - Xcode Command Line Tools (`xcode-select --install`)
+- Optional: [Ollama](https://ollama.ai) with `llama3.2:3b` for AI text cleanup
 
-## CLI Tool
-
-The installer also sets up a `voice` command for terminal use:
+## Build Manually
 
 ```bash
-voice           # Record, press Enter to stop, transcribes and copies to clipboard
-voice -s        # Silence-detection mode (auto-stops after 3s of silence)
-voice -k        # Keep the audio file after transcription
-voice -m large-v3-turbo  # Use a different Whisper model
+swiftc -O -o Voice Voice.swift \
+    -framework Cocoa -framework ApplicationServices -framework UserNotifications
 ```
 
 ## Uninstall
@@ -61,7 +74,6 @@ voice -m large-v3-turbo  # Use a different Whisper model
 ```bash
 pkill Voice
 rm ~/Library/LaunchAgents/com.local.voice.plist
-rm ~/bin/voice
 # Optionally remove the model:
 rm ~/.local/share/whisper-models/ggml-small.en.bin
 ```

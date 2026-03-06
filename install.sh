@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "=== VoiceMic Installer ==="
+echo "=== Voice Installer ==="
 
 # --- Dependencies ---
 echo "Checking dependencies..."
@@ -34,18 +34,18 @@ fi
 
 # --- Compile app ---
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-echo "Compiling VoiceMic..."
+echo "Compiling Voice..."
 
-swiftc -O -o "${SCRIPT_DIR}/VoiceMic" "${SCRIPT_DIR}/VoiceMic.swift" \
-    -framework Cocoa -framework Carbon -framework UserNotifications
+swiftc -O -o "${SCRIPT_DIR}/Voice" "${SCRIPT_DIR}/Voice.swift" \
+    -framework Cocoa -framework ApplicationServices -framework UserNotifications
 
 # --- Create app bundle ---
-APP_DIR="${SCRIPT_DIR}/VoiceMic.app/Contents"
+APP_DIR="${SCRIPT_DIR}/Voice.app/Contents"
 mkdir -p "${APP_DIR}/MacOS"
-cp "${SCRIPT_DIR}/VoiceMic" "${APP_DIR}/MacOS/VoiceMic"
+cp "${SCRIPT_DIR}/Voice" "${APP_DIR}/MacOS/Voice"
 cp "${SCRIPT_DIR}/Info.plist" "${APP_DIR}/Info.plist"
 
-echo "App bundle created at ${SCRIPT_DIR}/VoiceMic.app"
+echo "App bundle created at ${SCRIPT_DIR}/Voice.app"
 
 # --- Install voice CLI tool ---
 VOICE_SH="$(dirname "$SCRIPT_DIR")/voice.sh"
@@ -56,16 +56,16 @@ if [[ -f "$VOICE_SH" ]]; then
 fi
 
 # --- LaunchAgent (start on login) ---
-PLIST="${HOME}/Library/LaunchAgents/com.local.voicemic.plist"
+PLIST="${HOME}/Library/LaunchAgents/com.local.voice.plist"
 cat > "$PLIST" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.local.voicemic</string>
+    <string>com.local.voice</string>
     <key>Program</key>
-    <string>${APP_DIR}/MacOS/VoiceMic</string>
+    <string>${APP_DIR}/MacOS/Voice</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -76,13 +76,14 @@ EOF
 echo "LaunchAgent installed (starts on login)"
 
 # --- Launch ---
-echo "Launching VoiceMic..."
-open "${SCRIPT_DIR}/VoiceMic.app"
+echo "Launching Voice..."
+open "${SCRIPT_DIR}/Voice.app"
 
 echo ""
 echo "=== Done ==="
-echo "  Hotkey: Cmd+L to toggle recording"
-echo "  Menu bar: 🎙 icon"
-echo "  CLI: voice (record with Enter/silence to stop)"
+echo "  Hold fn        = Push-to-talk (record while held)"
+echo "  Space+fn       = POPO mode (lock-on dictation, tap fn to stop)"
+echo "  Escape         = Cancel recording"
+echo "  Menu bar: microphone icon"
 echo ""
-echo "First use: macOS will prompt for microphone permission -- grant it."
+echo "First use: macOS will prompt for Accessibility and Microphone permissions -- grant both."
