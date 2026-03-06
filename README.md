@@ -1,4 +1,4 @@
-# VoiceMic
+# Voice
 
 A macOS menu bar app that turns speech into text using local transcription. Press a hotkey, speak, press it again -- transcribed text lands on your clipboard.
 
@@ -25,8 +25,8 @@ Audio cues play on start (Tink), stop (Pop), and completion (Glass).
 ## Install
 
 ```bash
-git clone git@github.com:sho-luv/VoiceMic.git
-cd VoiceMic
+git clone git@github.com:sho-luv/Voice.git
+cd Voice
 ./install.sh
 ```
 
@@ -59,8 +59,8 @@ voice -m large-v3-turbo  # Use a different Whisper model
 ## Uninstall
 
 ```bash
-pkill VoiceMic
-rm ~/Library/LaunchAgents/com.local.voicemic.plist
+pkill Voice
+rm ~/Library/LaunchAgents/com.local.voice.plist
 rm ~/bin/voice
 # Optionally remove the model:
 rm ~/.local/share/whisper-models/ggml-small.en.bin
