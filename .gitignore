@@ -1,6 +1,12 @@
-# Compiled binary
-VoiceMic
-VoiceMic.app/
+# Compiled binary and app bundle
+Voice
+Voice.app/
+
+# Code signing
+_CodeSignature/
 
 # macOS
 .DS_Store
+
+# Temporary test files
+*.log
