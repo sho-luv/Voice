@@ -794,6 +794,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // Save the currently focused app so we can refocus it before pasting
         previousApp = NSWorkspace.shared.frontmostApplication
 
+        // Show feedback immediately — before process launch
+        appState = .recording
+        inputMonitor.setRecording(true)
+        updateIcon()
+        showOverlay(state: .recording)
+        playSound("Tink")
+
         let tempFile = NSTemporaryDirectory() + "voice_\(ProcessInfo.processInfo.globallyUniqueString).wav"
         audioFile = tempFile
 
@@ -806,12 +813,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         do {
             try process.run()
             recProcess = process
-            appState = .recording
-            inputMonitor.setRecording(true)
-            updateIcon()
-            showOverlay(state: .recording)
-            playSound("Tink")
         } catch {
+            appState = .idle
+            inputMonitor.setRecording(false)
+            updateIcon()
+            hideOverlay()
             showNotification(title: "Voice", body: "Failed to start recording: \(error.localizedDescription)")
         }
     }
@@ -868,6 +874,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         previousApp = NSWorkspace.shared.frontmostApplication
 
+        // Show feedback immediately — before process launch
+        appState = .popo
+        inputMonitor.setRecording(true)
+        inputMonitor.setPopo(true)
+        updateIcon()
+        showOverlay(state: .popo)
+        playSound("Morse")
+
         let tempFile = NSTemporaryDirectory() + "voice_\(ProcessInfo.processInfo.globallyUniqueString).wav"
         audioFile = tempFile
 
@@ -880,12 +894,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         do {
             try process.run()
             recProcess = process
-            appState = .popo
-            inputMonitor.setRecording(true)
-            inputMonitor.setPopo(true)
-            updateIcon()
-            showOverlay(state: .popo)
-            playSound("Morse")
 
             // Safety timeout
             popoTimer = Timer.scheduledTimer(withTimeInterval: popoTimeout, repeats: false) { [weak self] _ in
@@ -895,6 +903,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 }
             }
         } catch {
+            appState = .idle
+            inputMonitor.setRecording(false)
+            inputMonitor.setPopo(false)
+            updateIcon()
+            hideOverlay()
             showNotification(title: "Voice", body: "Failed to start recording: \(error.localizedDescription)")
         }
     }
