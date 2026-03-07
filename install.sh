@@ -45,7 +45,16 @@ mkdir -p "${APP_DIR}/MacOS"
 cp "${SCRIPT_DIR}/Voice" "${APP_DIR}/MacOS/Voice"
 cp "${SCRIPT_DIR}/Info.plist" "${APP_DIR}/Info.plist"
 
-echo "App bundle created at ${SCRIPT_DIR}/Voice.app"
+# Sign with stable identity so macOS TCC keeps accessibility permission across recompiles.
+# Falls back to ad-hoc if "Voice Dev" certificate isn't in keychain.
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "Voice Dev"; then
+    codesign --force --sign "Voice Dev" "${SCRIPT_DIR}/Voice.app"
+    echo "App bundle created and signed (Voice Dev) at ${SCRIPT_DIR}/Voice.app"
+else
+    codesign --force --sign - "${SCRIPT_DIR}/Voice.app"
+    echo "App bundle created (ad-hoc signed) at ${SCRIPT_DIR}/Voice.app"
+    echo "Note: You may need to re-grant Accessibility permission after recompiling."
+fi
 
 # --- Install voice CLI tool ---
 VOICE_SH="$(dirname "$SCRIPT_DIR")/voice.sh"

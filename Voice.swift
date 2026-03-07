@@ -11,6 +11,177 @@ enum AppState {
     case processing
 }
 
+// MARK: - AI Provider
+
+enum AIProvider: String, CaseIterable {
+    case ollama = "Ollama (local)"
+    case openai = "OpenAI"
+    case anthropic = "Anthropic"
+}
+
+// MARK: - Hotkey Option
+
+struct HotkeyOption {
+    let name: String
+    let keyCode: Int64
+    let flagMask: CGEventFlags
+}
+
+let hotkeyOptions: [HotkeyOption] = [
+    HotkeyOption(name: "fn", keyCode: 63, flagMask: .maskSecondaryFn),
+    HotkeyOption(name: "Right Option", keyCode: 61, flagMask: .maskAlternate),
+    HotkeyOption(name: "Left Option", keyCode: 58, flagMask: .maskAlternate),
+    HotkeyOption(name: "Right Cmd", keyCode: 54, flagMask: .maskCommand),
+]
+
+// MARK: - Settings
+
+class Settings {
+    static let shared = Settings()
+
+    private let defaults = UserDefaults.standard
+
+    private init() {
+        defaults.register(defaults: [
+            "hotkeyIndex": 0,
+            "soundsEnabled": true,
+            "autoStartOnLogin": true,
+            "popoTimeout": 5,
+            "clipboardRestore": true,
+            "aiEnabled": true,
+            "aiProvider": AIProvider.ollama.rawValue,
+            "aiModelOllama": "llama3.2:3b",
+            "aiModelOpenAI": "gpt-4o-mini",
+            "aiModelAnthropic": "claude-sonnet-4-20250514",
+            "apiKeyOpenAI": "",
+            "apiKeyAnthropic": "",
+            "whisperModel": "small.en",
+        ])
+    }
+
+    var hotkeyIndex: Int {
+        get { defaults.integer(forKey: "hotkeyIndex") }
+        set { defaults.set(newValue, forKey: "hotkeyIndex") }
+    }
+
+    var hotkeyCode: Int64 {
+        let idx = hotkeyIndex
+        return idx < hotkeyOptions.count ? hotkeyOptions[idx].keyCode : 63
+    }
+
+    var hotkeyFlag: CGEventFlags {
+        let idx = hotkeyIndex
+        return idx < hotkeyOptions.count ? hotkeyOptions[idx].flagMask : .maskSecondaryFn
+    }
+
+    var soundsEnabled: Bool {
+        get { defaults.bool(forKey: "soundsEnabled") }
+        set { defaults.set(newValue, forKey: "soundsEnabled") }
+    }
+
+    var autoStartOnLogin: Bool {
+        get { defaults.bool(forKey: "autoStartOnLogin") }
+        set {
+            defaults.set(newValue, forKey: "autoStartOnLogin")
+            updateLaunchAgent(enabled: newValue)
+        }
+    }
+
+    var popoTimeout: Int {
+        get { defaults.integer(forKey: "popoTimeout") }
+        set { defaults.set(max(1, min(30, newValue)), forKey: "popoTimeout") }
+    }
+
+    var popoTimeoutSeconds: TimeInterval {
+        TimeInterval(popoTimeout) * 60.0
+    }
+
+    var clipboardRestore: Bool {
+        get { defaults.bool(forKey: "clipboardRestore") }
+        set { defaults.set(newValue, forKey: "clipboardRestore") }
+    }
+
+    var aiEnabled: Bool {
+        get { defaults.bool(forKey: "aiEnabled") }
+        set { defaults.set(newValue, forKey: "aiEnabled") }
+    }
+
+    var aiProvider: AIProvider {
+        get { AIProvider(rawValue: defaults.string(forKey: "aiProvider") ?? "") ?? .ollama }
+        set { defaults.set(newValue.rawValue, forKey: "aiProvider") }
+    }
+
+    var aiModel: String {
+        get {
+            switch aiProvider {
+            case .ollama:    return defaults.string(forKey: "aiModelOllama") ?? "llama3.2:3b"
+            case .openai:    return defaults.string(forKey: "aiModelOpenAI") ?? "gpt-4o-mini"
+            case .anthropic: return defaults.string(forKey: "aiModelAnthropic") ?? "claude-sonnet-4-20250514"
+            }
+        }
+        set {
+            switch aiProvider {
+            case .ollama:    defaults.set(newValue, forKey: "aiModelOllama")
+            case .openai:    defaults.set(newValue, forKey: "aiModelOpenAI")
+            case .anthropic: defaults.set(newValue, forKey: "aiModelAnthropic")
+            }
+        }
+    }
+
+    var apiKey: String {
+        get {
+            switch aiProvider {
+            case .ollama:    return ""
+            case .openai:    return defaults.string(forKey: "apiKeyOpenAI") ?? ""
+            case .anthropic: return defaults.string(forKey: "apiKeyAnthropic") ?? ""
+            }
+        }
+        set {
+            switch aiProvider {
+            case .ollama:    break
+            case .openai:    defaults.set(newValue, forKey: "apiKeyOpenAI")
+            case .anthropic: defaults.set(newValue, forKey: "apiKeyAnthropic")
+            }
+        }
+    }
+
+    var whisperModel: String {
+        get { defaults.string(forKey: "whisperModel") ?? "small.en" }
+        set { defaults.set(newValue, forKey: "whisperModel") }
+    }
+
+    var whisperModelPath: String {
+        NSHomeDirectory() + "/.local/share/whisper-models/ggml-\(whisperModel).bin"
+    }
+
+    private func updateLaunchAgent(enabled: Bool) {
+        let plistPath = NSHomeDirectory() + "/Library/LaunchAgents/com.local.voice.plist"
+        if enabled {
+            // Find the current executable
+            let execPath = Bundle.main.executablePath ?? "\(NSHomeDirectory())/home/projects/voice/Voice.app/Contents/MacOS/Voice"
+            let plist = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+                <key>Label</key>
+                <string>com.local.voice</string>
+                <key>Program</key>
+                <string>\(execPath)</string>
+                <key>RunAtLoad</key>
+                <true/>
+                <key>KeepAlive</key>
+                <false/>
+            </dict>
+            </plist>
+            """
+            try? plist.write(toFile: plistPath, atomically: true, encoding: .utf8)
+        } else {
+            try? FileManager.default.removeItem(atPath: plistPath)
+        }
+    }
+}
+
 // MARK: - App Context
 
 struct AppContext {
@@ -70,6 +241,29 @@ struct AppContext {
     }
 }
 
+// MARK: - Shared Cleanup Prompt
+
+func cleanupSystemPrompt(appContext: AppContext) -> String {
+    """
+    You are a speech-to-text cleanup assistant. Your ONLY job is to clean up raw speech transcription:
+    1. Remove filler words (um, uh, like, you know, I mean, sort of, basically)
+    2. Fix grammar and punctuation
+    3. Handle mid-sentence corrections -- keep only the final version
+    4. Handle backtracking ("scratch that", "no wait") -- discard preceding clause
+    5. Add proper capitalization
+    6. Preserve the speaker's meaning exactly -- do NOT paraphrase
+    7. Output ONLY the cleaned text. No commentary.
+    Context: Writing in \(appContext.appName). \(appContext.toneGuidance)
+    """
+}
+
+// MARK: - AIClient Protocol
+
+protocol AIClient {
+    func cleanupText(_ text: String, appContext: AppContext, completion: @escaping (String) -> Void)
+    func testConnection(completion: @escaping (Bool, String) -> Void)
+}
+
 // MARK: - Input Monitor (CGEventTap for fn key)
 
 class InputMonitor {
@@ -87,6 +281,16 @@ class InputMonitor {
     private var isPopo = false
     private var spaceHeld = false
     private let minHoldDuration: TimeInterval = 0.3  // ignore taps < 300ms
+
+    // Cached hotkey values — read from Settings once, updated via reloadHotkey()
+    // Avoids hitting UserDefaults inside the CGEventTap callback
+    var hotkeyCode: Int64 = 63
+    var hotkeyFlag: CGEventFlags = .maskSecondaryFn
+
+    func reloadHotkey() {
+        hotkeyCode = Settings.shared.hotkeyCode
+        hotkeyFlag = Settings.shared.hotkeyFlag
+    }
 
     func start() -> Bool {
         // Try creating event tap directly — this is the real permission check
@@ -146,8 +350,9 @@ class InputMonitor {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags
 
-        // Debug logging (remove for production)
-        // NSLog("Voice: type=%d keyCode=%d flags=0x%llx", type.rawValue, keyCode, flags.rawValue)
+        // Use cached hotkey values from the monitor instance (no UserDefaults access)
+        let hotkeyCode = monitor.hotkeyCode
+        let hotkeyFlag = monitor.hotkeyFlag
 
         // Track Space key state (for POPO activation)
         if type == .keyDown && keyCode == 49 {
@@ -168,25 +373,25 @@ class InputMonitor {
             return Unmanaged.passRetained(event)
         }
 
-        // fn key = keycode 63 (flagsChanged)
-        guard type == .flagsChanged && keyCode == 63 else {
+        // Hotkey (flagsChanged)
+        guard type == .flagsChanged && keyCode == hotkeyCode else {
             return Unmanaged.passRetained(event)
         }
 
-        let fnPressed = flags.contains(.maskSecondaryFn)
+        let keyPressed = flags.contains(hotkeyFlag)
 
-        if fnPressed && !monitor.fnDown {
-            // fn key DOWN
+        if keyPressed && !monitor.fnDown {
+            // Key DOWN
             monitor.fnDown = true
             monitor.fnDownTime = ProcessInfo.processInfo.systemUptime
 
-            // In POPO mode, fn tap stops it
+            // In POPO mode, tap stops it
             if monitor.isPopo {
                 DispatchQueue.main.async { monitor.onPopoStop?() }
                 return nil  // swallow
             }
 
-            // Space+fn → POPO mode
+            // Space+key -> POPO mode
             if monitor.spaceHeld && !monitor.isRecording {
                 DispatchQueue.main.async { monitor.onPopoStart?() }
                 return nil  // swallow
@@ -196,10 +401,10 @@ class InputMonitor {
             if !monitor.isRecording {
                 DispatchQueue.main.async { monitor.onRecordStart?() }
             }
-            return nil  // swallow fn to prevent emoji picker
+            return nil  // swallow to prevent emoji picker / other default behavior
 
-        } else if !fnPressed && monitor.fnDown {
-            // fn key UP
+        } else if !keyPressed && monitor.fnDown {
+            // Key UP
             monitor.fnDown = false
             let holdDuration = ProcessInfo.processInfo.systemUptime - monitor.fnDownTime
 
@@ -466,19 +671,22 @@ class TextInjector {
 
     private func clipboardPasteFallback(_ text: String) {
         let pasteboard = NSPasteboard.general
+        let shouldRestore = Settings.shared.clipboardRestore
 
         // Save current clipboard contents (matching Wispr Flow's approach).
         // Filter to valid UTI types only — legacy types like NSStringPboardType cause errors on restore.
-        let savedTypes = pasteboard.types ?? []
         var savedData: [(NSPasteboard.PasteboardType, Data)] = []
-        for type in savedTypes {
-            let raw = type.rawValue
-            // Skip legacy non-UTI types (they start with "NS" or don't contain a dot)
-            if raw.hasPrefix("NS") || (!raw.contains(".") && !raw.hasPrefix("com.") && !raw.hasPrefix("public.") && !raw.hasPrefix("org.")) {
-                continue
-            }
-            if let data = pasteboard.data(forType: type) {
-                savedData.append((type, data))
+        if shouldRestore {
+            let savedTypes = pasteboard.types ?? []
+            for type in savedTypes {
+                let raw = type.rawValue
+                // Skip legacy non-UTI types (they start with "NS" or don't contain a dot)
+                if raw.hasPrefix("NS") || (!raw.contains(".") && !raw.hasPrefix("com.") && !raw.hasPrefix("public.") && !raw.hasPrefix("org.")) {
+                    continue
+                }
+                if let data = pasteboard.data(forType: type) {
+                    savedData.append((type, data))
+                }
             }
         }
 
@@ -498,14 +706,15 @@ class TextInjector {
 
             // Restore original clipboard after 500ms (same as Wispr Flow)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                // restore original clipboard
-                pasteboard.clearContents()
-                if !savedData.isEmpty {
-                    let restoreItem = NSPasteboardItem()
-                    for (type, data) in savedData {
-                        restoreItem.setData(data, forType: type)
+                if shouldRestore {
+                    pasteboard.clearContents()
+                    if !savedData.isEmpty {
+                        let restoreItem = NSPasteboardItem()
+                        for (type, data) in savedData {
+                            restoreItem.setData(data, forType: type)
+                        }
+                        pasteboard.writeObjects([restoreItem])
                     }
-                    pasteboard.writeObjects([restoreItem])
                 }
                 self?.activeProvider = nil
             }
@@ -518,7 +727,6 @@ class TextInjector {
         // but disabling the tap achieves the same effect in a single-process architecture.
         if let tap = inputMonitor?.eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
-            // tap disabled to prevent self-interception
         }
 
         let source = CGEventSource(stateID: .hidSystemState)
@@ -536,13 +744,11 @@ class TextInjector {
         keyUp.flags = .maskCommand
         keyDown.post(tap: .cghidEventTap)
         keyUp.post(tap: .cghidEventTap)
-        // Cmd+V posted to HID
 
         // Re-enable the event tap after a short delay to let the paste event propagate
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             if let tap = self?.inputMonitor?.eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
-                // tap re-enabled
             }
         }
     }
@@ -550,10 +756,11 @@ class TextInjector {
 
 // MARK: - Ollama Client
 
-class OllamaClient {
+class OllamaClient: AIClient {
     let baseURL = "http://localhost:11434"
-    let model = "llama3.2:3b"
     private var isAvailable = false
+
+    var model: String { Settings.shared.aiModel }
 
     func healthCheck(completion: @escaping (Bool) -> Void) {
         guard let url = URL(string: "\(baseURL)/api/tags") else {
@@ -590,28 +797,27 @@ class OllamaClient {
         URLSession.shared.dataTask(with: request) { _, _, _ in }.resume()
     }
 
-    func cleanupText(_ rawText: String, appContext: AppContext, completion: @escaping (String) -> Void) {
+    func cleanupText(_ text: String, appContext: AppContext, completion: @escaping (String) -> Void) {
         guard isAvailable else {
-            completion(rawText)
+            completion(text)
             return
         }
 
-        let truncated = String(rawText.prefix(4000))
-
-        let systemPrompt = """
-        You are a speech-to-text cleanup assistant. Your ONLY job is to clean up raw speech transcription:
-        1. Remove filler words (um, uh, like, you know, I mean, sort of, basically)
-        2. Fix grammar and punctuation
-        3. Handle mid-sentence corrections -- keep only the final version
-        4. Handle backtracking ("scratch that", "no wait") -- discard preceding clause
-        5. Add proper capitalization
-        6. Preserve the speaker's meaning exactly -- do NOT paraphrase
-        7. Output ONLY the cleaned text. No commentary.
-        Context: Writing in \(appContext.appName). \(appContext.toneGuidance)
-        """
+        let truncated = String(text.prefix(4000))
+        let systemPrompt = cleanupSystemPrompt(appContext: appContext)
 
         generate(system: systemPrompt, prompt: truncated) { result in
-            completion(result ?? rawText)
+            completion(result ?? text)
+        }
+    }
+
+    func testConnection(completion: @escaping (Bool, String) -> Void) {
+        healthCheck { available in
+            if available {
+                completion(true, "Ollama is running, model: \(self.model)")
+            } else {
+                completion(false, "Cannot connect to Ollama at localhost:11434")
+            }
         }
     }
 
@@ -650,6 +856,599 @@ class OllamaClient {
     }
 }
 
+// MARK: - OpenAI Client
+
+class OpenAIClient: AIClient {
+    func cleanupText(_ text: String, appContext: AppContext, completion: @escaping (String) -> Void) {
+        let apiKey = Settings.shared.apiKey
+        guard !apiKey.isEmpty else {
+            completion(text)
+            return
+        }
+
+        let truncated = String(text.prefix(4000))
+        let systemPrompt = cleanupSystemPrompt(appContext: appContext)
+
+        guard let url = URL(string: "https://api.openai.com/v1/chat/completions") else {
+            completion(text)
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 30
+
+        let body: [String: Any] = [
+            "model": Settings.shared.aiModel,
+            "messages": [
+                ["role": "system", "content": systemPrompt],
+                ["role": "user", "content": truncated]
+            ],
+            "temperature": 0.1,
+            "max_tokens": 2048
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            guard error == nil,
+                  let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let choices = json["choices"] as? [[String: Any]],
+                  let first = choices.first,
+                  let message = first["message"] as? [String: Any],
+                  let content = message["content"] as? String else {
+                completion(text)
+                return
+            }
+            let cleaned = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            completion(cleaned.isEmpty ? text : cleaned)
+        }.resume()
+    }
+
+    func testConnection(completion: @escaping (Bool, String) -> Void) {
+        let apiKey = Settings.shared.apiKey
+        guard !apiKey.isEmpty else {
+            completion(false, "No API key set")
+            return
+        }
+
+        guard let url = URL(string: "https://api.openai.com/v1/models") else {
+            completion(false, "Invalid URL")
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 10
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                completion(false, "Error: \(error.localizedDescription)")
+                return
+            }
+            guard let httpResponse = response as? HTTPURLResponse else {
+                completion(false, "No response")
+                return
+            }
+            if httpResponse.statusCode == 200 {
+                completion(true, "Connected to OpenAI, model: \(Settings.shared.aiModel)")
+            } else if httpResponse.statusCode == 401 {
+                completion(false, "Invalid API key")
+            } else {
+                completion(false, "HTTP \(httpResponse.statusCode)")
+            }
+        }.resume()
+    }
+}
+
+// MARK: - Anthropic Client
+
+class AnthropicClient: AIClient {
+    func cleanupText(_ text: String, appContext: AppContext, completion: @escaping (String) -> Void) {
+        let apiKey = Settings.shared.apiKey
+        guard !apiKey.isEmpty else {
+            completion(text)
+            return
+        }
+
+        let truncated = String(text.prefix(4000))
+        let systemPrompt = cleanupSystemPrompt(appContext: appContext)
+
+        guard let url = URL(string: "https://api.anthropic.com/v1/messages") else {
+            completion(text)
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.timeoutInterval = 30
+
+        let body: [String: Any] = [
+            "model": Settings.shared.aiModel,
+            "system": systemPrompt,
+            "messages": [
+                ["role": "user", "content": truncated]
+            ],
+            "temperature": 0.1,
+            "max_tokens": 2048
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            guard error == nil,
+                  let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let content = json["content"] as? [[String: Any]],
+                  let first = content.first,
+                  let responseText = first["text"] as? String else {
+                completion(text)
+                return
+            }
+            let cleaned = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+            completion(cleaned.isEmpty ? text : cleaned)
+        }.resume()
+    }
+
+    func testConnection(completion: @escaping (Bool, String) -> Void) {
+        let apiKey = Settings.shared.apiKey
+        guard !apiKey.isEmpty else {
+            completion(false, "No API key set")
+            return
+        }
+
+        guard let url = URL(string: "https://api.anthropic.com/v1/messages") else {
+            completion(false, "Invalid URL")
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.timeoutInterval = 10
+
+        let body: [String: Any] = [
+            "model": Settings.shared.aiModel,
+            "messages": [["role": "user", "content": "Hi"]],
+            "max_tokens": 1
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                completion(false, "Error: \(error.localizedDescription)")
+                return
+            }
+            guard let httpResponse = response as? HTTPURLResponse else {
+                completion(false, "No response")
+                return
+            }
+            if httpResponse.statusCode == 200 {
+                completion(true, "Connected to Anthropic, model: \(Settings.shared.aiModel)")
+            } else if httpResponse.statusCode == 401 {
+                completion(false, "Invalid API key")
+            } else {
+                completion(false, "HTTP \(httpResponse.statusCode)")
+            }
+        }.resume()
+    }
+}
+
+// MARK: - Settings Window
+
+class SettingsWindowController {
+    static let shared = SettingsWindowController()
+
+    private var window: NSWindow?
+
+    func show() {
+        if let w = window, w.isVisible {
+            w.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 380),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        w.title = "Voice Settings"
+        w.center()
+        w.isReleasedWhenClosed = false
+        w.isRestorable = false
+
+        let vc = SettingsViewController()
+        w.contentViewController = vc
+        w.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        window = w
+    }
+}
+
+class SettingsViewController: NSViewController {
+    private var tabView: NSTabView!
+
+    // General tab controls
+    private var hotkeyPopup: NSPopUpButton!
+    private var soundsCheckbox: NSButton!
+    private var autoStartCheckbox: NSButton!
+    private var popoStepper: NSStepper!
+    private var popoLabel: NSTextField!
+    private var clipboardCheckbox: NSButton!
+
+    // AI tab controls
+    private var aiEnabledCheckbox: NSButton!
+    private var providerPopup: NSPopUpButton!
+    private var modelField: NSTextField!
+    private var apiKeyLabel: NSTextField!
+    private var apiKeyField: NSSecureTextField!
+    private var testButton: NSButton!
+    private var testResultLabel: NSTextField!
+
+    // Transcription tab controls
+    private var whisperPopup: NSPopUpButton!
+    private var downloadButton: NSButton!
+    private var downloadStatusLabel: NSTextField!
+
+    override func loadView() {
+        self.view = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 380))
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+
+        tabView = NSTabView(frame: view.bounds.insetBy(dx: 12, dy: 12))
+        tabView.autoresizingMask = [.width, .height]
+        view.addSubview(tabView)
+
+        tabView.addTabViewItem(makeGeneralTab())
+        tabView.addTabViewItem(makeAITab())
+        tabView.addTabViewItem(makeTranscriptionTab())
+    }
+
+    // MARK: - General Tab
+
+    private func makeGeneralTab() -> NSTabViewItem {
+        let item = NSTabViewItem(identifier: "general")
+        item.label = "General"
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 450, height: 300))
+
+        var y: CGFloat = 260
+
+        // Push-to-talk key
+        addLabel("Push-to-talk key:", at: NSPoint(x: 20, y: y), in: container)
+        hotkeyPopup = NSPopUpButton(frame: NSRect(x: 180, y: y - 2, width: 200, height: 26), pullsDown: false)
+        for opt in hotkeyOptions {
+            hotkeyPopup.addItem(withTitle: opt.name)
+        }
+        hotkeyPopup.selectItem(at: Settings.shared.hotkeyIndex)
+        hotkeyPopup.target = self
+        hotkeyPopup.action = #selector(hotkeyChanged)
+        container.addSubview(hotkeyPopup)
+
+        y -= 40
+
+        // Sounds
+        soundsCheckbox = NSButton(checkboxWithTitle: "Sounds", target: self, action: #selector(soundsChanged))
+        soundsCheckbox.frame = NSRect(x: 20, y: y, width: 200, height: 22)
+        soundsCheckbox.state = Settings.shared.soundsEnabled ? .on : .off
+        container.addSubview(soundsCheckbox)
+
+        y -= 34
+
+        // Auto-start on login
+        autoStartCheckbox = NSButton(checkboxWithTitle: "Auto-start on login", target: self, action: #selector(autoStartChanged))
+        autoStartCheckbox.frame = NSRect(x: 20, y: y, width: 200, height: 22)
+        autoStartCheckbox.state = Settings.shared.autoStartOnLogin ? .on : .off
+        container.addSubview(autoStartCheckbox)
+
+        y -= 40
+
+        // POPO timeout
+        addLabel("POPO timeout (minutes):", at: NSPoint(x: 20, y: y), in: container)
+        popoLabel = NSTextField(labelWithString: "\(Settings.shared.popoTimeout)")
+        popoLabel.frame = NSRect(x: 200, y: y, width: 30, height: 22)
+        popoLabel.alignment = .center
+        container.addSubview(popoLabel)
+
+        popoStepper = NSStepper(frame: NSRect(x: 232, y: y, width: 19, height: 22))
+        popoStepper.minValue = 1
+        popoStepper.maxValue = 30
+        popoStepper.integerValue = Settings.shared.popoTimeout
+        popoStepper.target = self
+        popoStepper.action = #selector(popoTimeoutChanged)
+        container.addSubview(popoStepper)
+
+        y -= 40
+
+        // Clipboard restore
+        clipboardCheckbox = NSButton(checkboxWithTitle: "Restore clipboard after paste", target: self, action: #selector(clipboardChanged))
+        clipboardCheckbox.frame = NSRect(x: 20, y: y, width: 280, height: 22)
+        clipboardCheckbox.state = Settings.shared.clipboardRestore ? .on : .off
+        container.addSubview(clipboardCheckbox)
+
+        item.view = container
+        return item
+    }
+
+    // MARK: - AI Tab
+
+    private func makeAITab() -> NSTabViewItem {
+        let item = NSTabViewItem(identifier: "ai")
+        item.label = "AI"
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 450, height: 300))
+
+        var y: CGFloat = 260
+
+        // AI text cleanup
+        aiEnabledCheckbox = NSButton(checkboxWithTitle: "AI text cleanup", target: self, action: #selector(aiEnabledChanged))
+        aiEnabledCheckbox.frame = NSRect(x: 20, y: y, width: 200, height: 22)
+        aiEnabledCheckbox.state = Settings.shared.aiEnabled ? .on : .off
+        container.addSubview(aiEnabledCheckbox)
+
+        y -= 40
+
+        // Provider
+        addLabel("Provider:", at: NSPoint(x: 20, y: y), in: container)
+        providerPopup = NSPopUpButton(frame: NSRect(x: 180, y: y - 2, width: 200, height: 26), pullsDown: false)
+        for provider in AIProvider.allCases {
+            providerPopup.addItem(withTitle: provider.rawValue)
+        }
+        providerPopup.selectItem(withTitle: Settings.shared.aiProvider.rawValue)
+        providerPopup.target = self
+        providerPopup.action = #selector(providerChanged)
+        container.addSubview(providerPopup)
+
+        y -= 40
+
+        // Model
+        addLabel("Model:", at: NSPoint(x: 20, y: y), in: container)
+        modelField = NSTextField(frame: NSRect(x: 180, y: y - 2, width: 200, height: 24))
+        modelField.stringValue = Settings.shared.aiModel
+        modelField.target = self
+        modelField.action = #selector(modelChanged)
+        container.addSubview(modelField)
+
+        y -= 40
+
+        // API Key
+        apiKeyLabel = NSTextField(labelWithString: "API Key:")
+        apiKeyLabel.frame = NSRect(x: 20, y: y, width: 150, height: 22)
+        container.addSubview(apiKeyLabel)
+
+        apiKeyField = NSSecureTextField(frame: NSRect(x: 180, y: y - 2, width: 200, height: 24))
+        apiKeyField.stringValue = Settings.shared.apiKey
+        apiKeyField.target = self
+        apiKeyField.action = #selector(apiKeyChanged)
+        container.addSubview(apiKeyField)
+
+        y -= 44
+
+        // Test connection button
+        testButton = NSButton(title: "Test Connection", target: self, action: #selector(testConnection))
+        testButton.frame = NSRect(x: 20, y: y, width: 140, height: 28)
+        testButton.bezelStyle = .rounded
+        container.addSubview(testButton)
+
+        testResultLabel = NSTextField(labelWithString: "")
+        testResultLabel.frame = NSRect(x: 170, y: y + 4, width: 260, height: 22)
+        testResultLabel.textColor = .secondaryLabelColor
+        testResultLabel.font = NSFont.systemFont(ofSize: 11)
+        testResultLabel.lineBreakMode = .byTruncatingTail
+        container.addSubview(testResultLabel)
+
+        updateAPIKeyVisibility()
+
+        item.view = container
+        return item
+    }
+
+    // MARK: - Transcription Tab
+
+    private func makeTranscriptionTab() -> NSTabViewItem {
+        let item = NSTabViewItem(identifier: "transcription")
+        item.label = "Transcription"
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 450, height: 300))
+
+        var y: CGFloat = 260
+
+        // Whisper model
+        addLabel("Whisper model:", at: NSPoint(x: 20, y: y), in: container)
+        whisperPopup = NSPopUpButton(frame: NSRect(x: 180, y: y - 2, width: 200, height: 26), pullsDown: false)
+        let models = ["small.en", "medium.en", "large-v3"]
+        for m in models {
+            whisperPopup.addItem(withTitle: m)
+        }
+        whisperPopup.selectItem(withTitle: Settings.shared.whisperModel)
+        whisperPopup.target = self
+        whisperPopup.action = #selector(whisperModelChanged)
+        container.addSubview(whisperPopup)
+
+        y -= 44
+
+        // Download button
+        downloadButton = NSButton(title: "Download Model", target: self, action: #selector(downloadModel))
+        downloadButton.frame = NSRect(x: 20, y: y, width: 140, height: 28)
+        downloadButton.bezelStyle = .rounded
+        container.addSubview(downloadButton)
+
+        downloadStatusLabel = NSTextField(labelWithString: "")
+        downloadStatusLabel.frame = NSRect(x: 170, y: y + 4, width: 260, height: 22)
+        downloadStatusLabel.textColor = .secondaryLabelColor
+        downloadStatusLabel.font = NSFont.systemFont(ofSize: 11)
+        downloadStatusLabel.lineBreakMode = .byTruncatingTail
+        container.addSubview(downloadStatusLabel)
+
+        updateDownloadButton()
+
+        item.view = container
+        return item
+    }
+
+    // MARK: - Helpers
+
+    @discardableResult
+    private func addLabel(_ text: String, at point: NSPoint, in container: NSView) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.frame = NSRect(x: point.x, y: point.y, width: 160, height: 22)
+        container.addSubview(label)
+        return label
+    }
+
+    private func updateAPIKeyVisibility() {
+        let needsKey = Settings.shared.aiProvider != .ollama
+        apiKeyLabel.isHidden = !needsKey
+        apiKeyField.isHidden = !needsKey
+    }
+
+    private func updateDownloadButton() {
+        let path = Settings.shared.whisperModelPath
+        let exists = FileManager.default.fileExists(atPath: path)
+        downloadButton.isHidden = exists
+        downloadStatusLabel.stringValue = exists ? "Model available" : "Model not downloaded"
+        downloadStatusLabel.textColor = exists ? .systemGreen : .systemOrange
+    }
+
+    // MARK: - Actions
+
+    @objc private func hotkeyChanged() {
+        Settings.shared.hotkeyIndex = hotkeyPopup.indexOfSelectedItem
+        // Update the cached hotkey in the input monitor
+        if let delegate = NSApp.delegate as? AppDelegate {
+            delegate.inputMonitor.reloadHotkey()
+        }
+    }
+
+    @objc private func soundsChanged() {
+        Settings.shared.soundsEnabled = soundsCheckbox.state == .on
+    }
+
+    @objc private func autoStartChanged() {
+        Settings.shared.autoStartOnLogin = autoStartCheckbox.state == .on
+    }
+
+    @objc private func popoTimeoutChanged() {
+        Settings.shared.popoTimeout = popoStepper.integerValue
+        popoLabel.stringValue = "\(popoStepper.integerValue)"
+    }
+
+    @objc private func clipboardChanged() {
+        Settings.shared.clipboardRestore = clipboardCheckbox.state == .on
+    }
+
+    @objc private func aiEnabledChanged() {
+        Settings.shared.aiEnabled = aiEnabledCheckbox.state == .on
+    }
+
+    @objc private func providerChanged() {
+        if let title = providerPopup.selectedItem?.title,
+           let provider = AIProvider.allCases.first(where: { $0.rawValue == title }) {
+            Settings.shared.aiProvider = provider
+        }
+        // Update model field and API key visibility for new provider
+        modelField.stringValue = Settings.shared.aiModel
+        apiKeyField.stringValue = Settings.shared.apiKey
+        updateAPIKeyVisibility()
+        testResultLabel.stringValue = ""
+    }
+
+    @objc private func modelChanged() {
+        Settings.shared.aiModel = modelField.stringValue
+    }
+
+    @objc private func apiKeyChanged() {
+        Settings.shared.apiKey = apiKeyField.stringValue
+    }
+
+    @objc private func testConnection() {
+        testResultLabel.stringValue = "Testing..."
+        testResultLabel.textColor = .secondaryLabelColor
+
+        let client: AIClient
+        switch Settings.shared.aiProvider {
+        case .ollama:    client = OllamaClient()
+        case .openai:    client = OpenAIClient()
+        case .anthropic: client = AnthropicClient()
+        }
+
+        client.testConnection { [weak self] success, message in
+            DispatchQueue.main.async {
+                self?.testResultLabel.stringValue = message
+                self?.testResultLabel.textColor = success ? .systemGreen : .systemRed
+            }
+        }
+    }
+
+    @objc private func whisperModelChanged() {
+        if let title = whisperPopup.selectedItem?.title {
+            Settings.shared.whisperModel = title
+        }
+        updateDownloadButton()
+    }
+
+    @objc private func downloadModel() {
+        let modelName = Settings.shared.whisperModel
+        let modelDir = NSHomeDirectory() + "/.local/share/whisper-models"
+        let modelFile = "\(modelDir)/ggml-\(modelName).bin"
+        let urlString = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-\(modelName).bin"
+
+        downloadButton.isEnabled = false
+        downloadStatusLabel.stringValue = "Downloading \(modelName)..."
+        downloadStatusLabel.textColor = .secondaryLabelColor
+
+        // Ensure directory exists
+        try? FileManager.default.createDirectory(atPath: modelDir, withIntermediateDirectories: true)
+
+        guard let url = URL(string: urlString) else {
+            downloadStatusLabel.stringValue = "Invalid URL"
+            downloadStatusLabel.textColor = .systemRed
+            downloadButton.isEnabled = true
+            return
+        }
+
+        let task = URLSession.shared.downloadTask(with: url) { [weak self] tempURL, response, error in
+            DispatchQueue.main.async {
+                self?.downloadButton.isEnabled = true
+
+                if let error = error {
+                    self?.downloadStatusLabel.stringValue = "Error: \(error.localizedDescription)"
+                    self?.downloadStatusLabel.textColor = .systemRed
+                    return
+                }
+
+                guard let tempURL = tempURL else {
+                    self?.downloadStatusLabel.stringValue = "Download failed"
+                    self?.downloadStatusLabel.textColor = .systemRed
+                    return
+                }
+
+                do {
+                    // Remove existing file if present
+                    if FileManager.default.fileExists(atPath: modelFile) {
+                        try FileManager.default.removeItem(atPath: modelFile)
+                    }
+                    try FileManager.default.moveItem(at: tempURL, to: URL(fileURLWithPath: modelFile))
+                    self?.downloadStatusLabel.stringValue = "Download complete"
+                    self?.downloadStatusLabel.textColor = .systemGreen
+                    self?.updateDownloadButton()
+                } catch {
+                    self?.downloadStatusLabel.stringValue = "Error: \(error.localizedDescription)"
+                    self?.downloadStatusLabel.textColor = .systemRed
+                }
+            }
+        }
+        task.resume()
+    }
+}
+
 // MARK: - App Delegate
 
 class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
@@ -659,7 +1458,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     var audioFile: String?
     var previousApp: NSRunningApplication?  // saved before recording to refocus for paste
 
-    let modelPath = NSHomeDirectory() + "/.local/share/whisper-models/ggml-small.en.bin"
     let whisperPath = "/opt/homebrew/bin/whisper-cli"
     let recPath = "/opt/homebrew/bin/rec"
     let afplayPath = "/usr/bin/afplay"
@@ -670,12 +1468,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     let overlayWindow = OverlayWindow()
 
     var popoTimer: Timer?
-    let popoTimeout: TimeInterval = 300  // 5 minutes safety limit
 
     var dismissTimer: Timer?
     var lastTranscription: String?
 
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
+        return false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        return false
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Close any windows macOS may have restored despite our early prevention
+        for window in NSApp.windows where window.title == "Voice Settings" {
+            window.close()
+        }
+
+        // Prevent duplicate instances — if another Voice is already running, quit silently
+        let myPid = ProcessInfo.processInfo.processIdentifier
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.local.voice"
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .filter { $0.processIdentifier != myPid && !$0.isTerminated }
+        if !others.isEmpty {
+            NSLog("Voice: another instance already running (pid %d), quitting", others[0].processIdentifier)
+            NSApplication.shared.terminate(nil)
+            return
+        }
+
         // Request notification permissions
         UNUserNotificationCenter.current().delegate = self
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
@@ -685,11 +1506,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         updateIcon()
 
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "fn = Push-to-Talk", action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Space+fn = POPO Mode", action: nil, keyEquivalent: ""))
+        let hotkeyName = hotkeyOptions[Settings.shared.hotkeyIndex].name
+        menu.addItem(NSMenuItem(title: "\(hotkeyName) = Push-to-Talk", action: nil, keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Space+\(hotkeyName) = POPO Mode", action: nil, keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Escape = Cancel", action: nil, keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Paste Last", action: #selector(pasteLast), keyEquivalent: "v"))
+        menu.addItem(NSMenuItem.separator())
+        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ",")
+        menu.addItem(settingsItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit Voice", action: #selector(quitApp), keyEquivalent: "q"))
         statusItem.menu = menu
@@ -714,6 +1539,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             self?.stopPopo()
         }
 
+        inputMonitor.reloadHotkey()
         if !inputMonitor.start() {
             showNotification(title: "Voice", body: "Accessibility permission required. Add Voice.app in System Settings > Privacy & Security > Accessibility, then relaunch.")
             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
@@ -730,14 +1556,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
 
         // Preflight checks
-        if !FileManager.default.fileExists(atPath: modelPath) {
-            showNotification(title: "Voice", body: "Whisper model not found at \(modelPath)")
+        if !FileManager.default.fileExists(atPath: Settings.shared.whisperModelPath) {
+            showNotification(title: "Voice", body: "Whisper model not found at \(Settings.shared.whisperModelPath)")
         }
 
-        // Ollama health check and warmup
-        ollamaClient.healthCheck { [weak self] available in
-            if available {
-                self?.ollamaClient.warmup()
+        // Ollama health check and warmup (only if Ollama is the selected provider)
+        if Settings.shared.aiProvider == .ollama {
+            ollamaClient.healthCheck { [weak self] available in
+                if available {
+                    self?.ollamaClient.warmup()
+                }
             }
         }
     }
@@ -799,7 +1627,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         inputMonitor.setRecording(true)
         updateIcon()
         showOverlay(state: .recording)
-        playSound("Tink")
+        if Settings.shared.soundsEnabled { playSound("Tink") }
 
         let tempFile = NSTemporaryDirectory() + "voice_\(ProcessInfo.processInfo.globallyUniqueString).wav"
         audioFile = tempFile
@@ -833,7 +1661,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         inputMonitor.setRecording(false)
         updateIcon()
         showOverlay(state: .transcribing)
-        playSound("Pop")
+        if Settings.shared.soundsEnabled { playSound("Pop") }
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.transcribeAndProcess()
@@ -864,7 +1692,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         inputMonitor.setRecording(false)
         updateIcon()
         hideOverlay()
-        playSound("Funk")
+        if Settings.shared.soundsEnabled { playSound("Funk") }
     }
 
     // MARK: - POPO Mode
@@ -880,7 +1708,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         inputMonitor.setPopo(true)
         updateIcon()
         showOverlay(state: .popo)
-        playSound("Morse")
+        if Settings.shared.soundsEnabled { playSound("Morse") }
 
         let tempFile = NSTemporaryDirectory() + "voice_\(ProcessInfo.processInfo.globallyUniqueString).wav"
         audioFile = tempFile
@@ -896,10 +1724,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             recProcess = process
 
             // Safety timeout
-            popoTimer = Timer.scheduledTimer(withTimeInterval: popoTimeout, repeats: false) { [weak self] _ in
+            let timeout = Settings.shared.popoTimeoutSeconds
+            popoTimer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self] _ in
                 DispatchQueue.main.async {
                     self?.stopPopo()
-                    self?.showNotification(title: "Voice", body: "POPO mode auto-stopped after 5 minutes.")
+                    self?.showNotification(title: "Voice", body: "POPO mode auto-stopped after \(Settings.shared.popoTimeout) minutes.")
                 }
             }
         } catch {
@@ -934,7 +1763,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         inputMonitor.setRecording(false)
         updateIcon()
         showOverlay(state: .transcribing)
-        playSound("Submarine")
+        if Settings.shared.soundsEnabled { playSound("Submarine") }
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.transcribeAndProcess()
@@ -961,7 +1790,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         inputMonitor.setRecording(false)
         updateIcon()
         hideOverlay()
-        playSound("Funk")
+        if Settings.shared.soundsEnabled { playSound("Funk") }
     }
 
     // MARK: - Transcription & Processing
@@ -983,7 +1812,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         let process = Process()
         process.executableURL = URL(fileURLWithPath: whisperPath)
         process.arguments = [
-            "--model", modelPath,
+            "--model", Settings.shared.whisperModelPath,
             "--file", audioFile,
             "--no-timestamps",
             "--threads", "8",
@@ -1010,8 +1839,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 return
             }
 
+            // If AI cleanup is disabled, inject raw text directly
+            guard Settings.shared.aiEnabled else {
+                DispatchQueue.main.async { [weak self] in
+                    self?.refocusAndInject(rawText)
+                    self?.finishProcessing(text: rawText)
+                }
+                cleanup(audioFile)
+                return
+            }
+
             let context = AppContext.current()
-            ollamaClient.cleanupText(rawText, appContext: context) { [weak self] cleanedText in
+            let client: AIClient
+            switch Settings.shared.aiProvider {
+            case .ollama:    client = ollamaClient
+            case .openai:    client = OpenAIClient()
+            case .anthropic: client = AnthropicClient()
+            }
+
+            client.cleanupText(rawText, appContext: context) { [weak self] cleanedText in
                 DispatchQueue.main.async {
                     self?.refocusAndInject(cleanedText)
                     self?.finishProcessing(text: cleanedText)
@@ -1034,11 +1880,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 let preview = text.count > 80 ? String(text.prefix(80)) + "..." : text
                 self?.showOverlay(state: .done(preview))
                 self?.autoDismissOverlay(after: 1.5)
-                self?.playSound("Glass")
+                if Settings.shared.soundsEnabled { self?.playSound("Glass") }
             } else if let error = error {
                 self?.showOverlay(state: .error(error))
                 self?.autoDismissOverlay(after: 2.0)
-                self?.playSound("Basso")
+                if Settings.shared.soundsEnabled { self?.playSound("Basso") }
             }
         }
     }
@@ -1048,14 +1894,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     func refocusAndInject(_ text: String) {
         // Re-activate the app that was focused before recording started
         if let app = previousApp, !app.isTerminated {
-            // refocus previous app before injection
             app.activate()
             // Give the app time to regain focus before injecting
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
                 self?.textInjector.injectText(text)
             }
         } else {
-            // no previous app to refocus
             textInjector.injectText(text)
         }
     }
@@ -1091,9 +1935,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         completionHandler([.banner, .sound])
     }
 
+    @objc func openSettings() {
+        SettingsWindowController.shared.show()
+    }
+
     @objc func pasteLast() {
         guard let text = lastTranscription else {
-            playSound("Basso")
+            if Settings.shared.soundsEnabled { playSound("Basso") }
             return
         }
         // Put text on clipboard immediately (user can also manually Cmd+V)
@@ -1107,6 +1955,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
 
     @objc func quitApp() {
+        // Close settings window before quit so macOS doesn't snapshot it
+        for window in NSApp.windows {
+            window.close()
+        }
         popoTimer?.invalidate()
         inputMonitor.stop()
         if let process = recProcess, process.isRunning {
@@ -1120,6 +1972,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 }
 
 // MARK: - Main
+
+// Disable macOS window restoration BEFORE app.run() — restoration happens during run(),
+// before applicationDidFinishLaunching, so this must be set early.
+UserDefaults.standard.set(false, forKey: "NSQuitAlwaysKeepsWindows")
+// Nuke any saved state left over from a previous run
+let savedStatePath = NSHomeDirectory() + "/Library/Saved Application State/com.local.voice.savedState"
+try? FileManager.default.removeItem(atPath: savedStatePath)
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
