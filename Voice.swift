@@ -1074,6 +1074,9 @@ class SettingsWindowController {
 }
 
 class SettingsViewController: NSViewController {
+    private let openaiModels = ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "o4-mini"]
+    private let anthropicModels = ["claude-sonnet-4-20250514", "claude-haiku-4-20250414", "claude-opus-4-20250514"]
+
     private var tabView: NSTabView!
 
     // General tab controls
@@ -1087,7 +1090,9 @@ class SettingsViewController: NSViewController {
     // AI tab controls
     private var aiEnabledCheckbox: NSButton!
     private var providerPopup: NSPopUpButton!
-    private var modelField: NSTextField!
+    private var modelPopup: NSPopUpButton!
+    private var ollamaStatusLabel: NSTextField!
+    private var ollamaInstallButton: NSButton!
     private var apiKeyLabel: NSTextField!
     private var apiKeyField: NSSecureTextField!
     private var testButton: NSButton!
@@ -1211,13 +1216,30 @@ class SettingsViewController: NSViewController {
 
         // Model
         addLabel("Model:", at: NSPoint(x: 20, y: y), in: container)
-        modelField = NSTextField(frame: NSRect(x: 180, y: y - 2, width: 200, height: 24))
-        modelField.stringValue = Settings.shared.aiModel
-        modelField.target = self
-        modelField.action = #selector(modelChanged)
-        container.addSubview(modelField)
+        modelPopup = NSPopUpButton(frame: NSRect(x: 180, y: y - 2, width: 200, height: 26), pullsDown: false)
+        modelPopup.target = self
+        modelPopup.action = #selector(modelChanged)
+        container.addSubview(modelPopup)
+        populateModelPopup()
 
-        y -= 40
+        y -= 34
+
+        // Ollama status + install (hidden unless Ollama provider selected and unreachable)
+        ollamaStatusLabel = NSTextField(labelWithString: "")
+        ollamaStatusLabel.frame = NSRect(x: 20, y: y, width: 200, height: 22)
+        ollamaStatusLabel.textColor = .systemOrange
+        ollamaStatusLabel.font = NSFont.systemFont(ofSize: 12)
+        ollamaStatusLabel.isHidden = true
+        container.addSubview(ollamaStatusLabel)
+
+        ollamaInstallButton = NSButton(title: "Install Ollama", target: self, action: #selector(installOllama))
+        ollamaInstallButton.frame = NSRect(x: 230, y: y - 2, width: 150, height: 24)
+        ollamaInstallButton.bezelStyle = .rounded
+        ollamaInstallButton.font = NSFont.systemFont(ofSize: 11)
+        ollamaInstallButton.isHidden = true
+        container.addSubview(ollamaInstallButton)
+
+        y -= 34
 
         // API Key
         apiKeyLabel = NSTextField(labelWithString: "API Key:")
@@ -1303,10 +1325,83 @@ class SettingsViewController: NSViewController {
         return label
     }
 
+    private func populateModelPopup() {
+        modelPopup.removeAllItems()
+        let saved = Settings.shared.aiModel
+
+        switch Settings.shared.aiProvider {
+        case .openai:
+            modelPopup.addItems(withTitles: openaiModels)
+        case .anthropic:
+            modelPopup.addItems(withTitles: anthropicModels)
+        case .ollama:
+            modelPopup.addItem(withTitle: saved)
+            fetchOllamaModels()
+        }
+
+        if modelPopup.item(withTitle: saved) == nil {
+            modelPopup.addItem(withTitle: saved)
+        }
+        modelPopup.selectItem(withTitle: saved)
+        updateOllamaStatus()
+    }
+
+    private func fetchOllamaModels() {
+        guard let url = URL(string: "http://localhost:11434/api/tags") else { return }
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
+            guard let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let models = json["models"] as? [[String: Any]] else {
+                if error != nil {
+                    DispatchQueue.main.async { self?.updateOllamaStatus() }
+                }
+                return
+            }
+            let names = models.compactMap { $0["name"] as? String }.sorted()
+            guard !names.isEmpty else { return }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                let saved = self.modelPopup.selectedItem?.title ?? Settings.shared.aiModel
+                self.modelPopup.removeAllItems()
+                self.modelPopup.addItems(withTitles: names)
+                if self.modelPopup.item(withTitle: saved) == nil {
+                    self.modelPopup.addItem(withTitle: saved)
+                }
+                self.modelPopup.selectItem(withTitle: saved)
+            }
+        }.resume()
+    }
+
     private func updateAPIKeyVisibility() {
         let needsKey = Settings.shared.aiProvider != .ollama
         apiKeyLabel.isHidden = !needsKey
         apiKeyField.isHidden = !needsKey
+    }
+
+    private func updateOllamaStatus() {
+        guard Settings.shared.aiProvider == .ollama else {
+            ollamaStatusLabel.isHidden = true
+            ollamaInstallButton.isHidden = true
+            return
+        }
+
+        guard let url = URL(string: "http://localhost:11434/api/tags") else { return }
+        URLSession.shared.dataTask(with: url) { [weak self] _, response, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if error == nil, let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                    self.ollamaStatusLabel.isHidden = true
+                    self.ollamaInstallButton.isHidden = true
+                } else {
+                    self.ollamaStatusLabel.stringValue = "Ollama not found"
+                    self.ollamaStatusLabel.textColor = .systemOrange
+                    self.ollamaStatusLabel.isHidden = false
+                    self.ollamaInstallButton.isHidden = false
+                    self.ollamaInstallButton.isEnabled = true
+                    self.ollamaInstallButton.title = "Install Ollama"
+                }
+            }
+        }.resume()
     }
 
     private func updateDownloadButton() {
@@ -1353,15 +1448,18 @@ class SettingsViewController: NSViewController {
            let provider = AIProvider.allCases.first(where: { $0.rawValue == title }) {
             Settings.shared.aiProvider = provider
         }
-        // Update model field and API key visibility for new provider
-        modelField.stringValue = Settings.shared.aiModel
+        // Update model popup, API key visibility, and Ollama status for new provider
+        populateModelPopup()
         apiKeyField.stringValue = Settings.shared.apiKey
         updateAPIKeyVisibility()
+        updateOllamaStatus()
         testResultLabel.stringValue = ""
     }
 
     @objc private func modelChanged() {
-        Settings.shared.aiModel = modelField.stringValue
+        if let title = modelPopup.selectedItem?.title {
+            Settings.shared.aiModel = title
+        }
     }
 
     @objc private func apiKeyChanged() {
@@ -1383,6 +1481,107 @@ class SettingsViewController: NSViewController {
             DispatchQueue.main.async {
                 self?.testResultLabel.stringValue = message
                 self?.testResultLabel.textColor = success ? .systemGreen : .systemRed
+            }
+        }
+    }
+
+    @objc private func installOllama() {
+        ollamaInstallButton.isEnabled = false
+        ollamaStatusLabel.stringValue = "Installing Ollama..."
+        ollamaStatusLabel.textColor = .secondaryLabelColor
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // Step 1: brew install ollama
+            let brewInstall = Process()
+            brewInstall.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/brew")
+            brewInstall.arguments = ["install", "ollama"]
+            let installPipe = Pipe()
+            brewInstall.standardOutput = installPipe
+            brewInstall.standardError = installPipe
+
+            do {
+                try brewInstall.run()
+                brewInstall.waitUntilExit()
+            } catch {
+                DispatchQueue.main.async {
+                    self?.ollamaStatusLabel.stringValue = "Install failed: \(error.localizedDescription)"
+                    self?.ollamaStatusLabel.textColor = .systemRed
+                    self?.ollamaInstallButton.isEnabled = true
+                }
+                return
+            }
+
+            guard brewInstall.terminationStatus == 0 else {
+                let data = installPipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: data, encoding: .utf8) ?? "Unknown error"
+                let firstLine = output.components(separatedBy: .newlines).first(where: { !$0.isEmpty }) ?? "brew install failed"
+                DispatchQueue.main.async {
+                    self?.ollamaStatusLabel.stringValue = firstLine
+                    self?.ollamaStatusLabel.textColor = .systemRed
+                    self?.ollamaInstallButton.isEnabled = true
+                }
+                return
+            }
+
+            // Step 2: Start Ollama via brew services
+            DispatchQueue.main.async {
+                self?.ollamaStatusLabel.stringValue = "Starting Ollama..."
+            }
+
+            let brewStart = Process()
+            brewStart.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/brew")
+            brewStart.arguments = ["services", "start", "ollama"]
+            brewStart.standardOutput = FileHandle.nullDevice
+            brewStart.standardError = FileHandle.nullDevice
+            try? brewStart.run()
+            brewStart.waitUntilExit()
+
+            // Wait for the server to be ready
+            Thread.sleep(forTimeInterval: 3.0)
+
+            // Step 3: Pull default model
+            DispatchQueue.main.async {
+                self?.ollamaStatusLabel.stringValue = "Pulling llama3.2:3b model..."
+            }
+
+            let pull = Process()
+            pull.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/ollama")
+            pull.arguments = ["pull", "llama3.2:3b"]
+            let pullPipe = Pipe()
+            pull.standardOutput = pullPipe
+            pull.standardError = pullPipe
+
+            do {
+                try pull.run()
+                pull.waitUntilExit()
+            } catch {
+                DispatchQueue.main.async {
+                    self?.ollamaStatusLabel.stringValue = "Model pull failed: \(error.localizedDescription)"
+                    self?.ollamaStatusLabel.textColor = .systemRed
+                    self?.ollamaInstallButton.isEnabled = true
+                }
+                return
+            }
+
+            guard pull.terminationStatus == 0 else {
+                DispatchQueue.main.async {
+                    self?.ollamaStatusLabel.stringValue = "Model pull failed"
+                    self?.ollamaStatusLabel.textColor = .systemRed
+                    self?.ollamaInstallButton.isEnabled = true
+                }
+                return
+            }
+
+            // Success
+            DispatchQueue.main.async {
+                self?.ollamaStatusLabel.stringValue = "Ollama ready!"
+                self?.ollamaStatusLabel.textColor = .systemGreen
+                self?.ollamaInstallButton.isHidden = true
+                self?.populateModelPopup()
+                // Hide status after a few seconds
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                    self?.ollamaStatusLabel.isHidden = true
+                }
             }
         }
     }

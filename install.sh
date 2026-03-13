@@ -21,6 +21,22 @@ if ! command -v rec &>/dev/null; then
     brew install sox
 fi
 
+# --- Optional: Ollama ---
+if ! command -v ollama &>/dev/null; then
+    read -p "Install Ollama for local AI? (y/N) " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo "Installing Ollama..."
+        brew install ollama
+        brew services start ollama
+        echo "Waiting for Ollama to start..."
+        sleep 3
+        echo "Pulling llama3.2:3b model..."
+        ollama pull llama3.2:3b
+        echo "Ollama ready!"
+    fi
+fi
+
 # --- Whisper model ---
 MODEL_DIR="${HOME}/.local/share/whisper-models"
 MODEL_FILE="${MODEL_DIR}/ggml-small.en.bin"
