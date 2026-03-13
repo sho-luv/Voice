@@ -15,7 +15,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSUIElement</key>
-    <true/>
+    <false/>
+    <key>CFBundleIconFile</key>
+    <string>Voice</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Voice needs microphone access to record speech for transcription.</string>
 </dict>

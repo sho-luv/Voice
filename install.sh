@@ -42,8 +42,10 @@ swiftc -O -o "${SCRIPT_DIR}/Voice" "${SCRIPT_DIR}/Voice.swift" \
 # --- Create app bundle ---
 APP_DIR="${SCRIPT_DIR}/Voice.app/Contents"
 mkdir -p "${APP_DIR}/MacOS"
+mkdir -p "${APP_DIR}/Resources"
 cp "${SCRIPT_DIR}/Voice" "${APP_DIR}/MacOS/Voice"
 cp "${SCRIPT_DIR}/Info.plist" "${APP_DIR}/Info.plist"
+cp "${SCRIPT_DIR}/Voice.icns" "${APP_DIR}/Resources/Voice.icns"
 
 # Sign with stable identity so macOS TCC keeps accessibility permission across recompiles.
 # Falls back to ad-hoc if "Voice Dev" certificate isn't in keychain.

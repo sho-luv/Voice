@@ -1570,13 +1570,46 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
     }
 
+    func makeWaveformImage() -> NSImage {
+        let w: CGFloat = 18, h: CGFloat = 18
+        let img = NSImage(size: NSSize(width: w, height: h))
+        img.lockFocus()
+        let barCount = 7
+        let barW: CGFloat = 1.5
+        let gap: CGFloat = 1.0
+        let totalW = CGFloat(barCount) * barW + CGFloat(barCount - 1) * gap
+        let startX = (w - totalW) / 2.0
+        let centerY = h / 2.0
+        let maxH = h * 0.7
+        let heights: [CGFloat] = [0.25, 0.5, 0.75, 1.0, 0.75, 0.5, 0.25]
+        NSColor.black.setFill()
+        for i in 0..<barCount {
+            let bh = maxH * heights[i]
+            let x = startX + CGFloat(i) * (barW + gap)
+            let y = centerY - bh / 2.0
+            NSBezierPath(roundedRect: NSRect(x: x, y: y, width: barW, height: bh),
+                         xRadius: barW / 2, yRadius: barW / 2).fill()
+        }
+        img.unlockFocus()
+        img.isTemplate = true
+        return img
+    }
+
     func updateIcon() {
         guard let button = statusItem.button else { return }
         switch appState {
-        case .idle:       button.title = "\u{1F3A4}"  // microphone
-        case .recording:  button.title = "\u{1F534}"  // red circle
-        case .popo:       button.title = "\u{1F535}"  // blue circle
-        case .processing: button.title = "\u{23F3}"   // hourglass
+        case .idle:
+            button.title = ""
+            button.image = makeWaveformImage()
+        case .recording:
+            button.image = nil
+            button.title = "\u{1F534}"  // red circle
+        case .popo:
+            button.image = nil
+            button.title = "\u{1F535}"  // blue circle
+        case .processing:
+            button.image = nil
+            button.title = "\u{23F3}"   // hourglass
         }
     }
 

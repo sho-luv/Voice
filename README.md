@@ -1,8 +1,12 @@
+<p align="center">
+  <img src="icon.png" width="128" alt="Voice app icon" />
+</p>
+
 # Voice
 
 **Local speech-to-text for macOS. Hold fn, speak, release. Text appears wherever your cursor is.**
 
-Voice is a lightweight menu bar app that replaces cloud-based dictation with fast, private, local transcription. It works everywhere -- terminals, browsers, editors, chat apps -- without sending a single byte off your machine.
+Voice is a menu bar and Dock app that replaces cloud-based dictation with fast, private, local transcription. It works everywhere -- terminals, browsers, editors, chat apps -- without sending a single byte off your machine.
 
 Built with [whisper.cpp](https://github.com/ggerganov/whisper.cpp) for transcription and optionally [Ollama](https://ollama.ai), [OpenAI](https://openai.com), or [Anthropic](https://anthropic.com) for AI-powered text cleanup. Inspired by [Wispr Flow](https://wispr.com).
 
@@ -41,11 +45,11 @@ A floating overlay at the top of the screen shows what's happening:
 | Checkmark + text preview | Done |
 | X + error message | Something went wrong |
 
-The menu bar icon also reflects the current state. Click it for options including **Paste Last** to re-insert the most recent transcription.
+The menu bar icon (a waveform) also reflects the current state. Click it for options including **Paste Last** to re-insert the most recent transcription. The app also appears in the Dock with its waveform icon.
 
 ## Settings
 
-Open from the menu bar (click the mic icon > "Settings...") or press **Cmd+,**.
+Open from the menu bar (click the waveform icon > "Settings...") or press **Cmd+,**.
 
 ### General
 
@@ -131,8 +135,10 @@ swiftc -O -o Voice Voice.swift \
 
 # Create app bundle
 mkdir -p Voice.app/Contents/MacOS
+mkdir -p Voice.app/Contents/Resources
 cp Voice Voice.app/Contents/MacOS/Voice
 cp Info.plist Voice.app/Contents/Info.plist
+cp Voice.icns Voice.app/Contents/Resources/Voice.icns
 
 # Sign (see Code Signing section below)
 codesign --force --sign - Voice.app
