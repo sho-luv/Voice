@@ -191,6 +191,11 @@ class Settings {
         set { defaults.set(newValue, forKey: "overlayShowTimer") }
     }
 
+    var onboardingComplete: Bool {
+        get { defaults.bool(forKey: "onboardingComplete") }
+        set { defaults.set(newValue, forKey: "onboardingComplete") }
+    }
+
     func updateLaunchAgent(enabled: Bool) {
         let plistPath = NSHomeDirectory() + "/Library/LaunchAgents/com.faradaysoft.voice.plist"
         if enabled {
@@ -1242,6 +1247,458 @@ class AnthropicClient: AIClient {
     }
 }
 
+// MARK: - Onboarding Wizard
+
+class OnboardingWindowController {
+    static let shared = OnboardingWindowController()
+
+    private var window: NSWindow?
+    private var currentStep = 0
+    private var stepViews: [NSView] = []
+    private var progressDots: [NSView] = []
+    private var nextButton: NSButton?
+    private var accessibilityTimer: Timer?
+
+    func show() {
+        if let w = window, w.isVisible {
+            w.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let w = createWindow()
+        window = w
+        showStep(0)
+        w.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func createWindow() -> NSWindow {
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 360),
+            styleMask: [.titled],  // no close button — user must complete onboarding
+            backing: .buffered,
+            defer: false
+        )
+        w.title = "Welcome to Voice"
+        w.center()
+        w.isReleasedWhenClosed = false
+        w.isRestorable = false
+
+        guard let contentView = w.contentView else { return w }
+
+        // Build step views
+        let welcomeStep = createWelcomeStep(in: contentView)
+        let accessibilityStep = createAccessibilityStep(in: contentView)
+        let micStep = createMicrophoneStep(in: contentView)
+        let testStep = createTestStep(in: contentView)
+
+        stepViews = [welcomeStep, accessibilityStep, micStep, testStep]
+        for sv in stepViews {
+            sv.isHidden = true
+            contentView.addSubview(sv)
+        }
+
+        // Progress dots at bottom center
+        let dotContainer = NSView(frame: NSRect(x: 160, y: 16, width: 160, height: 16))
+        let dotSize: CGFloat = 8
+        let dotSpacing: CGFloat = 20
+        let totalDotWidth = CGFloat(4) * dotSize + CGFloat(3) * (dotSpacing - dotSize)
+        let startX = (160 - totalDotWidth) / 2
+        for i in 0..<4 {
+            let dot = NSView(frame: NSRect(x: startX + CGFloat(i) * dotSpacing, y: 4, width: dotSize, height: dotSize))
+            dot.wantsLayer = true
+            dot.layer?.cornerRadius = dotSize / 2
+            dot.layer?.backgroundColor = NSColor.lightGray.cgColor
+            dotContainer.addSubview(dot)
+            progressDots.append(dot)
+        }
+        contentView.addSubview(dotContainer)
+
+        // Next button (shared across steps, positioned bottom-right)
+        let btn = NSButton(frame: NSRect(x: 360, y: 16, width: 100, height: 32))
+        btn.title = "Get Started"
+        btn.bezelStyle = .rounded
+        btn.keyEquivalent = "\r"
+        btn.target = self
+        btn.action = #selector(nextStep)
+        contentView.addSubview(btn)
+        nextButton = btn
+
+        return w
+    }
+
+    private func showStep(_ step: Int) {
+        currentStep = step
+
+        for (i, sv) in stepViews.enumerated() {
+            sv.isHidden = (i != step)
+        }
+
+        // Update progress dots
+        for (i, dot) in progressDots.enumerated() {
+            dot.layer?.backgroundColor = (i == step)
+                ? NSColor.controlAccentColor.cgColor
+                : NSColor.lightGray.cgColor
+        }
+
+        // Update button title and state
+        switch step {
+        case 0:
+            nextButton?.title = "Get Started"
+            nextButton?.isEnabled = true
+        case 1:
+            nextButton?.title = "Next"
+            // Disabled until AX granted — startAccessibilityStepPolling manages this
+            nextButton?.isEnabled = AXIsProcessTrusted()
+            startAccessibilityStepPolling()
+        case 2:
+            nextButton?.title = "Next"
+            // Enabled if mic already authorized
+            let status = AVCaptureDevice.authorizationStatus(for: .audio)
+            nextButton?.isEnabled = (status == .authorized)
+        case 3:
+            nextButton?.title = "Finish"
+            nextButton?.isEnabled = true
+        default:
+            break
+        }
+    }
+
+    @objc private func nextStep() {
+        let next = currentStep + 1
+        if next >= stepViews.count {
+            complete()
+        } else {
+            showStep(next)
+        }
+    }
+
+    private func complete() {
+        accessibilityTimer?.invalidate()
+        accessibilityTimer = nil
+        Settings.shared.onboardingComplete = true
+        window?.close()
+        window = nil
+    }
+
+    // MARK: - Step Builders
+
+    private func createWelcomeStep(in container: NSView) -> NSView {
+        let view = NSView(frame: NSRect(x: 0, y: 50, width: 480, height: 300))
+
+        // App icon at top center
+        let iconView = NSImageView(frame: NSRect(x: 190, y: 190, width: 100, height: 100))
+        iconView.image = NSApp.applicationIconImage
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        view.addSubview(iconView)
+
+        // Title
+        let title = NSTextField(labelWithString: "Welcome to Voice")
+        title.font = NSFont.boldSystemFont(ofSize: 20)
+        title.frame = NSRect(x: 40, y: 140, width: 400, height: 40)
+        title.alignment = .center
+        view.addSubview(title)
+
+        // Subtitle
+        let subtitle = NSTextField(wrappingLabelWithString: "Press a key, speak, text appears. All processing happens locally on your Mac.")
+        subtitle.font = NSFont.systemFont(ofSize: 14)
+        subtitle.textColor = NSColor.secondaryLabelColor
+        subtitle.frame = NSRect(x: 60, y: 60, width: 360, height: 70)
+        subtitle.alignment = .center
+        view.addSubview(subtitle)
+
+        return view
+    }
+
+    private func createAccessibilityStep(in container: NSView) -> NSView {
+        let view = NSView(frame: NSRect(x: 0, y: 50, width: 480, height: 300))
+
+        // Title
+        let title = NSTextField(labelWithString: "Accessibility Permission")
+        title.font = NSFont.boldSystemFont(ofSize: 18)
+        title.frame = NSRect(x: 40, y: 240, width: 400, height: 30)
+        title.alignment = .center
+        view.addSubview(title)
+
+        // Explanation
+        let explanation = NSTextField(wrappingLabelWithString: "Voice needs Accessibility permission to detect your hotkey. Without it, Voice can't listen for the fn key press.")
+        explanation.font = NSFont.systemFont(ofSize: 14)
+        explanation.textColor = NSColor.secondaryLabelColor
+        explanation.frame = NSRect(x: 40, y: 160, width: 400, height: 70)
+        explanation.alignment = .center
+        view.addSubview(explanation)
+
+        // Open System Settings button
+        let openBtn = NSButton(frame: NSRect(x: 155, y: 115, width: 170, height: 32))
+        openBtn.title = "Open System Settings"
+        openBtn.bezelStyle = .rounded
+        openBtn.target = self
+        openBtn.action = #selector(openAccessibilitySettings)
+        view.addSubview(openBtn)
+
+        // Status label
+        let statusLabel = NSTextField(labelWithString: "Waiting for permission...")
+        statusLabel.font = NSFont.systemFont(ofSize: 13)
+        statusLabel.textColor = NSColor.systemOrange
+        statusLabel.frame = NSRect(x: 40, y: 75, width: 400, height: 28)
+        statusLabel.alignment = .center
+        statusLabel.identifier = NSUserInterfaceItemIdentifier("axStatusLabel")
+        view.addSubview(statusLabel)
+
+        // Trigger system prompt
+        _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeRetainedValue(): true] as CFDictionary)
+
+        return view
+    }
+
+    private func createMicrophoneStep(in container: NSView) -> NSView {
+        let view = NSView(frame: NSRect(x: 0, y: 50, width: 480, height: 300))
+
+        // Title
+        let title = NSTextField(labelWithString: "Microphone Permission")
+        title.font = NSFont.boldSystemFont(ofSize: 18)
+        title.frame = NSRect(x: 40, y: 240, width: 400, height: 30)
+        title.alignment = .center
+        view.addSubview(title)
+
+        // Explanation
+        let explanation = NSTextField(wrappingLabelWithString: "Voice records your speech locally using your Mac's microphone. No audio ever leaves your device.")
+        explanation.font = NSFont.systemFont(ofSize: 14)
+        explanation.textColor = NSColor.secondaryLabelColor
+        explanation.frame = NSRect(x: 40, y: 160, width: 400, height: 70)
+        explanation.alignment = .center
+        view.addSubview(explanation)
+
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        if status == .authorized {
+            let statusLabel = NSTextField(labelWithString: "Microphone permission granted!")
+            statusLabel.font = NSFont.systemFont(ofSize: 13)
+            statusLabel.textColor = NSColor.systemGreen
+            statusLabel.frame = NSRect(x: 40, y: 105, width: 400, height: 28)
+            statusLabel.alignment = .center
+            view.addSubview(statusLabel)
+        } else if status == .denied {
+            let instructions = NSTextField(wrappingLabelWithString: "Microphone access was denied. Please go to System Settings > Privacy & Security > Microphone and enable Voice.")
+            instructions.font = NSFont.systemFont(ofSize: 13)
+            instructions.textColor = NSColor.systemRed
+            instructions.frame = NSRect(x: 40, y: 85, width: 400, height: 55)
+            instructions.alignment = .center
+            view.addSubview(instructions)
+        } else {
+            // .notDetermined or other
+            let grantBtn = NSButton(frame: NSRect(x: 165, y: 110, width: 150, height: 32))
+            grantBtn.title = "Grant Permission"
+            grantBtn.bezelStyle = .rounded
+            grantBtn.target = self
+            grantBtn.action = #selector(requestMicrophoneAccess)
+            view.addSubview(grantBtn)
+
+            let statusLabel = NSTextField(labelWithString: "Microphone access required")
+            statusLabel.font = NSFont.systemFont(ofSize: 13)
+            statusLabel.textColor = NSColor.systemOrange
+            statusLabel.frame = NSRect(x: 40, y: 75, width: 400, height: 28)
+            statusLabel.alignment = .center
+            statusLabel.identifier = NSUserInterfaceItemIdentifier("micStatusLabel")
+            view.addSubview(statusLabel)
+        }
+
+        return view
+    }
+
+    private func createTestStep(in container: NSView) -> NSView {
+        let view = NSView(frame: NSRect(x: 0, y: 50, width: 480, height: 300))
+
+        // Title
+        let title = NSTextField(labelWithString: "Test Your Setup")
+        title.font = NSFont.boldSystemFont(ofSize: 18)
+        title.frame = NSRect(x: 40, y: 240, width: 400, height: 30)
+        title.alignment = .center
+        view.addSubview(title)
+
+        // Instruction
+        let instruction = NSTextField(wrappingLabelWithString: "Press the button below and say a few words. We'll transcribe them to confirm everything works.")
+        instruction.font = NSFont.systemFont(ofSize: 14)
+        instruction.textColor = NSColor.secondaryLabelColor
+        instruction.frame = NSRect(x: 40, y: 170, width: 400, height: 65)
+        instruction.alignment = .center
+        view.addSubview(instruction)
+
+        // Start Test button
+        let testBtn = NSButton(frame: NSRect(x: 175, y: 125, width: 130, height: 32))
+        testBtn.title = "Start Test"
+        testBtn.bezelStyle = .rounded
+        testBtn.target = self
+        testBtn.action = #selector(startTestRecording)
+        testBtn.identifier = NSUserInterfaceItemIdentifier("testBtn")
+        view.addSubview(testBtn)
+
+        // Status label
+        let statusLabel = NSTextField(labelWithString: "")
+        statusLabel.font = NSFont.systemFont(ofSize: 13)
+        statusLabel.textColor = NSColor.secondaryLabelColor
+        statusLabel.frame = NSRect(x: 40, y: 90, width: 400, height: 28)
+        statusLabel.alignment = .center
+        statusLabel.identifier = NSUserInterfaceItemIdentifier("testStatusLabel")
+        view.addSubview(statusLabel)
+
+        // Result text field
+        let resultField = NSTextField(wrappingLabelWithString: "")
+        resultField.font = NSFont.systemFont(ofSize: 13)
+        resultField.textColor = NSColor.labelColor
+        resultField.frame = NSRect(x: 40, y: 50, width: 400, height: 36)
+        resultField.alignment = .center
+        resultField.identifier = NSUserInterfaceItemIdentifier("testResultField")
+        view.addSubview(resultField)
+
+        return view
+    }
+
+    // MARK: - Accessibility Step Polling
+
+    private func startAccessibilityStepPolling() {
+        accessibilityTimer?.invalidate()
+        accessibilityTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            if AXIsProcessTrusted() {
+                self.accessibilityTimer?.invalidate()
+                self.accessibilityTimer = nil
+                // Update status label to green
+                if let stepView = self.stepViews.indices.contains(1) ? self.stepViews[1] : nil {
+                    for subview in stepView.subviews {
+                        if let label = subview as? NSTextField,
+                           label.identifier?.rawValue == "axStatusLabel" {
+                            label.stringValue = "Permission granted!"
+                            label.textColor = NSColor.systemGreen
+                            break
+                        }
+                    }
+                }
+                self.nextButton?.isEnabled = true
+                // Auto-advance after 0.5s
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    if self?.currentStep == 1 {
+                        self?.nextStep()
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Actions
+
+    @objc private func openAccessibilitySettings() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+    }
+
+    @objc private func requestMicrophoneAccess() {
+        AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if granted {
+                    self.nextButton?.isEnabled = true
+                    // Update mic step UI
+                    if let stepView = self.stepViews.indices.contains(2) ? self.stepViews[2] : nil {
+                        for subview in stepView.subviews {
+                            if let label = subview as? NSTextField,
+                               label.identifier?.rawValue == "micStatusLabel" {
+                                label.stringValue = "Microphone permission granted!"
+                                label.textColor = NSColor.systemGreen
+                                break
+                            }
+                        }
+                    }
+                    // Auto-advance
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                        if self?.currentStep == 2 {
+                            self?.nextStep()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @objc private func startTestRecording() {
+        guard let stepView = stepViews.indices.contains(3) ? stepViews[3] : nil else { return }
+
+        // Update UI
+        for subview in stepView.subviews {
+            if let label = subview as? NSTextField,
+               label.identifier?.rawValue == "testStatusLabel" {
+                label.stringValue = "Listening..."
+                label.textColor = NSColor.secondaryLabelColor
+            }
+            if let label = subview as? NSTextField,
+               label.identifier?.rawValue == "testResultField" {
+                label.stringValue = ""
+            }
+            if let btn = subview as? NSButton,
+               btn.identifier?.rawValue == "testBtn" {
+                btn.isEnabled = false
+            }
+        }
+        nextButton?.isEnabled = false
+
+        guard let delegate = NSApp.delegate as? AppDelegate else { return }
+
+        // Start recording using AppDelegate's methods
+        delegate.startRecording()
+
+        // Stop after 3 seconds and transcribe
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            guard let self = self else { return }
+
+            // Update status
+            for subview in stepView.subviews {
+                if let label = subview as? NSTextField,
+                   label.identifier?.rawValue == "testStatusLabel" {
+                    label.stringValue = "Transcribing..."
+                }
+            }
+
+            delegate.stopRecording()
+
+            // Poll for transcription result (wait up to 10s)
+            var checkCount = 0
+            Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] timer in
+                checkCount += 1
+                guard let self = self else { timer.invalidate(); return }
+                if delegate.appState == .idle, let transcription = delegate.lastTranscription {
+                    timer.invalidate()
+                    self.showTestResult(transcription: transcription, stepView: stepView)
+                } else if checkCount > 20 {
+                    timer.invalidate()
+                    self.showTestResult(transcription: nil, stepView: stepView)
+                }
+            }
+        }
+    }
+
+    private func showTestResult(transcription: String?, stepView: NSView) {
+        for subview in stepView.subviews {
+            if let label = subview as? NSTextField,
+               label.identifier?.rawValue == "testStatusLabel" {
+                if let text = transcription, !text.isEmpty {
+                    label.stringValue = "Everything works! You're all set."
+                    label.textColor = NSColor.systemGreen
+                } else {
+                    label.stringValue = "Something went wrong. You can try again or finish setup."
+                    label.textColor = NSColor.systemOrange
+                }
+            }
+            if let label = subview as? NSTextField,
+               label.identifier?.rawValue == "testResultField" {
+                label.stringValue = transcription ?? ""
+            }
+            if let btn = subview as? NSButton,
+               btn.identifier?.rawValue == "testBtn" {
+                btn.isEnabled = true
+            }
+        }
+        nextButton?.isEnabled = true
+    }
+}
+
 // MARK: - Settings Window
 
 class SettingsWindowController {
@@ -2147,10 +2604,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             self?.stopPopo()
         }
 
+        // First-launch onboarding (per D-05)
+        if !Settings.shared.onboardingComplete {
+            OnboardingWindowController.shared.show()
+        }
+
+        // Start accessibility polling for auto-restart (per D-19, D-20)
+        startAccessibilityPolling()
+
         inputMonitor.reloadHotkey()
         if !inputMonitor.start() {
-            showNotification(title: "Voice", body: "Accessibility permission required. Add Voice.app in System Settings > Privacy & Security > Accessibility, then relaunch.")
-            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+            if Settings.shared.onboardingComplete {
+                // Only show notification if onboarding already done (onboarding handles its own UX)
+                showNotification(title: "Voice", body: "Accessibility permission required. Add Voice.app in System Settings > Privacy & Security > Accessibility.")
+                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+            }
+            // AX polling timer (started above) will handle relaunch when permission is granted
         }
 
         // Re-create event tap after wake from sleep
@@ -2175,6 +2644,38 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                     self?.ollamaClient.warmup()
                 }
             }
+        }
+    }
+
+    // MARK: - Accessibility Polling
+
+    private var wasAccessibilityGranted = false
+    private var accessibilityPollTimer: Timer?
+
+    func startAccessibilityPolling() {
+        wasAccessibilityGranted = AXIsProcessTrusted()
+        accessibilityPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            let isNowGranted = AXIsProcessTrusted()
+            guard let self = self, isNowGranted != self.wasAccessibilityGranted else { return }
+            self.wasAccessibilityGranted = isNowGranted
+            if isNowGranted {
+                // Permission was just granted — relaunch to re-create event tap
+                self.relaunchSilently()
+            }
+            // If permission was revoked, the event tap will simply stop working;
+            // the onboarding handles the initial grant, this covers post-onboarding toggling
+        }
+    }
+
+    func relaunchSilently() {
+        accessibilityPollTimer?.invalidate()
+        accessibilityPollTimer = nil
+        guard let bundleURL = Bundle.main.bundleURL as URL? else { return }
+        let config = NSWorkspace.OpenConfiguration()
+        config.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: bundleURL, configuration: config) { _, _ in }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            NSApp.terminate(nil)
         }
     }
 
