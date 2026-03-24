@@ -212,6 +212,14 @@ class Settings {
         set { defaults.set(Double(newValue), forKey: "overlayFontSize") }
     }
 
+    var overlaySensitivity: Float {
+        get {
+            let val = defaults.float(forKey: "overlaySensitivity")
+            return val > 0 ? val : 30.0
+        }
+        set { defaults.set(newValue, forKey: "overlaySensitivity") }
+    }
+
     var onboardingComplete: Bool {
         get { defaults.bool(forKey: "onboardingComplete") }
         set { defaults.set(newValue, forKey: "onboardingComplete") }
@@ -597,6 +605,33 @@ class InputMonitor {
 // Mini preview of the overlay pill shown in Settings
 class OverlayPreviewView: NSView {
     var fontSize: CGFloat = 11.0
+    private let containerWidth: CGFloat = 430  // parent container width for centering
+
+    // Calculate ideal width for current settings
+    func idealWidth() -> CGFloat {
+        let textAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: fontSize, weight: .medium)]
+        let smallAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: fontSize - 1)]
+        let padding: CGFloat = 24
+        var w: CGFloat = 8 + 6  // dot + gap
+        if Settings.shared.overlayShowAppIcon { w += 16 + 4 }
+        if Settings.shared.overlayShowAppName {
+            w += min(("Terminal" as NSString).size(withAttributes: smallAttrs).width, 60) + 8
+        }
+        w += 35 + 8  // waveform + gap
+        if Settings.shared.overlayShowTimer {
+            w += ("0:05" as NSString).size(withAttributes: textAttrs).width
+        }
+        return w + padding
+    }
+
+    func resizeToFit() {
+        let w = idealWidth()
+        let h = max(fontSize * 2.4, 28)
+        let centerX = (containerWidth - w) / 2
+        let originY = frame.origin.y + frame.height - h
+        frame = NSRect(x: centerX, y: originY, width: w, height: h)
+        needsDisplay = true
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         if !Settings.shared.overlayEnabled { return }
@@ -623,19 +658,15 @@ class OverlayPreviewView: NSView {
         let barGap: CGFloat = 2.0
         let waveformWidth = CGFloat(barCount) * barWidth + CGFloat(barCount - 1) * barGap
 
-        // Measure total width
         var totalWidth: CGFloat = dotSize + 6
-        var appNameWidth: CGFloat = 0
         let sampleApp = "Terminal"
         if Settings.shared.overlayShowAppName {
-            appNameWidth = min((sampleApp as NSString).size(withAttributes: smallAttrs).width, 60)
-            totalWidth += appNameWidth + 8
+            totalWidth += min((sampleApp as NSString).size(withAttributes: smallAttrs).width, 60) + 8
         }
         totalWidth += waveformWidth + 8
         let timerStr = "0:05" as NSString
-        let timerWidth = timerStr.size(withAttributes: textAttrs).width
         if Settings.shared.overlayShowTimer {
-            totalWidth += timerWidth
+            totalWidth += timerStr.size(withAttributes: textAttrs).width
         }
 
         var x = bounds.midX - totalWidth / 2
@@ -646,14 +677,12 @@ class OverlayPreviewView: NSView {
         NSBezierPath(ovalIn: dotRect).fill()
         x += dotSize + 6
 
-        // App name
         if Settings.shared.overlayShowAppName {
             let nameSize = (sampleApp as NSString).size(withAttributes: smallAttrs)
             (sampleApp as NSString).draw(at: NSPoint(x: x, y: bounds.midY - nameSize.height / 2), withAttributes: smallAttrs)
             x += min(nameSize.width, 60) + 8
         }
 
-        // Static waveform bars
         let sampleLevels: [CGFloat] = [0.2, 0.4, 0.6, 0.9, 0.6, 0.4, 0.2]
         let maxBarHeight: CGFloat = bounds.height * 0.6
         let minBarHeight: CGFloat = 4.0
@@ -666,7 +695,6 @@ class OverlayPreviewView: NSView {
         }
         x += waveformWidth + 8
 
-        // Timer
         if Settings.shared.overlayShowTimer {
             let timerSize = timerStr.size(withAttributes: textAttrs)
             timerStr.draw(at: NSPoint(x: x, y: bounds.midY - timerSize.height / 2), withAttributes: textAttrs)
@@ -699,17 +727,32 @@ class OverlayWindow: NSWindow {
 
         let fontSize = Settings.shared.overlayFontSize
         let padding: CGFloat = 24  // left + right padding
+        var contentWidth: CGFloat = 0
 
-        // Calculate content width based on enabled elements
-        var contentWidth: CGFloat = 8 + 6  // dot + gap
-        if Settings.shared.overlayShowAppIcon { contentWidth += 16 + 4 }
-        if Settings.shared.overlayShowAppName, !cv.targetAppName.isEmpty {
-            let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: fontSize - 1)]
-            let nameW = min((cv.targetAppName as NSString).size(withAttributes: attrs).width, 80)
-            contentWidth += nameW + 8
+        switch cv.overlayState {
+        case .recording, .popo:
+            // dot + gap
+            contentWidth = 8 + 6
+            if Settings.shared.overlayShowAppIcon { contentWidth += 16 + 4 }
+            if Settings.shared.overlayShowAppName, !cv.targetAppName.isEmpty {
+                let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: fontSize - 1)]
+                let nameW = min((cv.targetAppName as NSString).size(withAttributes: attrs).width, 80)
+                contentWidth += nameW + 8
+            }
+            contentWidth += 35 + 8  // waveform + gap
+            if Settings.shared.overlayShowTimer { contentWidth += 40 }
+        case .transcribing:
+            let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: fontSize + 2, weight: .medium)]
+            contentWidth = ("\u{23F3} Transcribing..." as NSString).size(withAttributes: attrs).width
+        case .done(let preview):
+            let truncated = preview.count > 30 ? String(preview.prefix(30)) + "..." : preview
+            let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: fontSize + 2, weight: .medium)]
+            contentWidth = ("\u{2713} \(truncated)" as NSString).size(withAttributes: attrs).width
+        case .error(let msg):
+            let truncated = msg.count > 30 ? String(msg.prefix(30)) + "..." : msg
+            let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: fontSize + 2, weight: .medium)]
+            contentWidth = ("\u{2717} \(truncated)" as NSString).size(withAttributes: attrs).width
         }
-        contentWidth += 35 + 8  // waveform + gap
-        if Settings.shared.overlayShowTimer { contentWidth += 40 }
 
         let w = contentWidth + padding
         let h = max(fontSize * 2.4, 28)  // height based on font size
@@ -777,7 +820,7 @@ class OverlayContentView: NSView {
                 self.audioLevels[i] = self.audioLevels[i + 1]
             }
             // Amplify for visual impact (raw RMS is very small)
-            let amplified = min(Float(1.0), level * 12.0)
+            let amplified = min(Float(1.0), level * Settings.shared.overlaySensitivity)
             self.audioLevels[self.audioLevels.count - 1] = amplified
 
             self.needsDisplay = true
@@ -2259,6 +2302,8 @@ class SettingsViewController: NSViewController {
     private var overlayFontSizeSlider: NSSlider!
     private var overlayFontSizeLabel: NSTextField!
     private var overlayPreview: OverlayPreviewView!
+    private var sensitivitySlider: NSSlider!
+    private var sensitivityLabel: NSTextField!
 
     // Transcription tab controls
     private var whisperPopup: NSPopUpButton!
@@ -2436,14 +2481,26 @@ class SettingsViewController: NSViewController {
         overlayFontSizeLabel.font = NSFont.systemFont(ofSize: 11)
         overlayFontSizeLabel.textColor = .secondaryLabelColor
         container.addSubview(overlayFontSizeLabel)
+        y -= 24
+
+        addLabel("Sensitivity:", at: NSPoint(x: 40, y: y + 2), in: container)
+        sensitivitySlider = NSSlider(value: Double(Settings.shared.overlaySensitivity), minValue: 5, maxValue: 80, target: self, action: #selector(sensitivityChanged))
+        sensitivitySlider.frame = NSRect(x: 140, y: y, width: 120, height: 22)
+        container.addSubview(sensitivitySlider)
+        sensitivityLabel = NSTextField(labelWithString: "\(Int(Settings.shared.overlaySensitivity))x")
+        sensitivityLabel.frame = NSRect(x: 265, y: y + 2, width: 40, height: 18)
+        sensitivityLabel.font = NSFont.systemFont(ofSize: 11)
+        sensitivityLabel.textColor = .secondaryLabelColor
+        container.addSubview(sensitivityLabel)
         y -= 30
 
         // Preview — auto-sized to match content
-        let fontSize = Settings.shared.overlayFontSize
-        let previewH = max(fontSize * 2.4, 28)
-        overlayPreview = OverlayPreviewView(frame: NSRect(x: 40, y: y - previewH, width: 370, height: previewH))
-        overlayPreview.fontSize = fontSize
+        let previewFontSize = Settings.shared.overlayFontSize
+        let previewH = max(previewFontSize * 2.4, 28)
+        overlayPreview = OverlayPreviewView(frame: NSRect(x: 0, y: y - previewH, width: 200, height: previewH))
+        overlayPreview.fontSize = previewFontSize
         container.addSubview(overlayPreview)
+        overlayPreview.resizeToFit()
 
         item.view = container
         return item
@@ -2489,7 +2546,7 @@ class SettingsViewController: NSViewController {
         Settings.shared.overlayShowAppIcon = overlayAppIconCheckbox.state == .on
         // overlayBgSlider handled by its own action
         Settings.shared.overlayShowTimer = overlayTimerCheckbox.state == .on
-        overlayPreview.needsDisplay = true
+        overlayPreview.resizeToFit()
     }
 
     @objc private func overlayBgChanged() {
@@ -2499,15 +2556,18 @@ class SettingsViewController: NSViewController {
         overlayPreview.needsDisplay = true
     }
 
+    @objc private func sensitivityChanged() {
+        let val = Int(sensitivitySlider.doubleValue)
+        Settings.shared.overlaySensitivity = Float(val)
+        sensitivityLabel.stringValue = "\(val)x"
+    }
+
     @objc private func overlayFontSizeChanged() {
         let size = CGFloat(Int(overlayFontSizeSlider.doubleValue))
         Settings.shared.overlayFontSize = size
         overlayFontSizeLabel.stringValue = "\(Int(size))pt"
         overlayPreview.fontSize = size
-        let newH = max(size * 2.4, 28)
-        let originY = overlayPreview.frame.origin.y + overlayPreview.frame.height - newH
-        overlayPreview.frame = NSRect(x: 40, y: originY, width: 370, height: newH)
-        overlayPreview.needsDisplay = true
+        overlayPreview.resizeToFit()
     }
 
     // MARK: - AI Tab
