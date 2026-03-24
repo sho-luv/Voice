@@ -19,7 +19,7 @@
 
 ### Distribution
 
-- [ ] **DIST-01**: App is signed with Developer ID and DMG is notarized
+- [x] **DIST-01**: App is signed with Developer ID and DMG is notarized
 - [ ] **DIST-02**: First launch guides user through accessibility and microphone permissions
 - [ ] **DIST-03**: App auto-restarts when accessibility permission is toggled
 - [ ] **DIST-04**: App validates LemonSqueezy license key (gate after trial period)
@@ -69,7 +69,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | AUD-04 | Phase 1 | Complete |
 | VIS-01 | Phase 1 | Complete |
 | VIS-02 | Phase 1 | Complete |
-| DIST-01 | Phase 2 | Pending |
+| DIST-01 | Phase 2 | Complete |
 | DIST-02 | Phase 2 | Pending |
 | DIST-03 | Phase 2 | Pending |
 | DIST-04 | Phase 2 | Pending |

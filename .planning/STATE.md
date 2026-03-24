@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v3.2
 milestone_name: milestone
-status: Ready to plan
-stopped_at: Phase 2 context gathered
-last_updated: "2026-03-24T09:46:08.286Z"
+status: Ready to execute
+stopped_at: Completed 02-distribution-01-PLAN.md
+last_updated: "2026-03-24T14:56:36.358Z"
 progress:
   total_phases: 3
   completed_phases: 1
-  total_plans: 3
-  completed_plans: 3
+  total_plans: 6
+  completed_plans: 4
 ---
 
 # Project State
@@ -19,12 +19,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-24)
 
 **Core value:** Local-only, instant dictation that works everywhere on macOS — press a key, speak, text appears. Privacy is non-negotiable.
-**Current focus:** Phase 01 — audio-visual
+**Current focus:** Phase 02 — distribution
 
 ## Current Position
 
-Phase: 2
-Plan: Not started
+Phase: 02 (distribution) — EXECUTING
+Plan: 2 of 3
 
 ## Performance Metrics
 
@@ -48,6 +48,7 @@ Plan: Not started
 *Updated after each plan completion*
 | Phase 01-audio-visual P01 | 18 | 2 tasks | 1 files |
 | Phase 01-audio-visual P02 | 3 | 2 tasks | 2 files |
+| Phase 02-distribution P01 | 12 | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -63,6 +64,8 @@ Recent decisions affecting current work:
 - [Phase 01-audio-visual]: Expose currentAudioLevel Float RMS on AppDelegate for Plan 03 waveform overlay
 - [Phase 01-audio-visual]: Use Unmanaged<CFString> with takeRetainedValue() for CoreAudio CFString properties — avoids unsafe pointer warnings
 - [Phase 01-audio-visual]: Zero-signal detection: rms < 0.0001 after 8 buffers (~2s) triggers overlay warning, auto-dismisses after 3s
+- [Phase 02-distribution]: Inside-out signing order (dylibs -> whisper-cli -> app) required for hardened runtime — --deep disabled in Developer ID path
+- [Phase 02-distribution]: updateLaunchAgent changed from private to internal so AppDelegate migration code can call Settings.shared.updateLaunchAgent during first-launch upgrade
 
 ### Pending Todos
 
@@ -77,6 +80,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-24T09:46:08.283Z
-Stopped at: Phase 2 context gathered
-Resume file: .planning/phases/02-distribution/02-CONTEXT.md
+Last session: 2026-03-24T14:56:36.356Z
+Stopped at: Completed 02-distribution-01-PLAN.md
+Resume file: None
