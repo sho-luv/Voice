@@ -2379,9 +2379,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
         popoTimer?.invalidate()
         inputMonitor.stop()
-        if let process = recProcess, process.isRunning {
-            process.terminate()
-        }
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine?.stop()
+        audioEngine = nil
+        audioFileHandle?.closeFile()
+        audioFileHandle = nil
         if let file = audioFile {
             cleanup(file)
         }
