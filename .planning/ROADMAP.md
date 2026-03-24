@@ -44,7 +44,12 @@ Plans:
   2. First launch walks a non-technical user through accessibility and microphone permission dialogs step by step
   3. App restarts itself automatically when the user toggles accessibility permission in System Settings
   4. App requires a valid LemonSqueezy license key after the trial period and refuses to transcribe without one
-**Plans**: TBD
+**Plans:** 3 plans
+
+Plans:
+- [ ] 02-01-PLAN.md — Unify bundle ID, tighten entitlements, Developer ID signing + notarization pipeline
+- [ ] 02-02-PLAN.md — First-launch onboarding wizard and accessibility auto-restart
+- [ ] 02-03-PLAN.md — LemonSqueezy license enforcement with 14-day trial
 
 ### Phase 3: History + Editing
 **Goal**: Users can review, search, and reuse past transcriptions, improve accuracy with custom vocabulary, control text with voice commands, and transcribe audio/video files
@@ -65,5 +70,5 @@ Phases execute in numeric order: 1 -> 2 -> 3
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Audio + Visual | 3/3 | Complete   | 2026-03-24 |
-| 2. Distribution | 0/TBD | Not started | - |
+| 2. Distribution | 0/3 | Planned | - |
 | 3. History + Editing | 0/TBD | Not started | - |
