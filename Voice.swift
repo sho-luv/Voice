@@ -1,6 +1,7 @@
 import Cocoa
 import ApplicationServices
 import UserNotifications
+import AVFoundation
 
 // MARK: - App State
 
@@ -1655,12 +1656,48 @@ class SettingsViewController: NSViewController {
     }
 }
 
+// MARK: - WAV Header Writer
+
+func writeWAVHeader(to handle: FileHandle, dataSize: UInt32) {
+    var header = Data()
+    // RIFF chunk
+    header.append(contentsOf: "RIFF".utf8)
+    var chunkSize = UInt32(36 + dataSize).littleEndian
+    header.append(Data(bytes: &chunkSize, count: 4))
+    header.append(contentsOf: "WAVE".utf8)
+    // fmt sub-chunk
+    header.append(contentsOf: "fmt ".utf8)
+    var subchunk1Size = UInt32(16).littleEndian
+    header.append(Data(bytes: &subchunk1Size, count: 4))
+    var audioFormat = UInt16(1).littleEndian  // PCM
+    header.append(Data(bytes: &audioFormat, count: 2))
+    var numChannels = UInt16(1).littleEndian  // mono
+    header.append(Data(bytes: &numChannels, count: 2))
+    var sampleRate = UInt32(16000).littleEndian
+    header.append(Data(bytes: &sampleRate, count: 4))
+    var byteRate = UInt32(32000).littleEndian  // 16000 * 1 * 2
+    header.append(Data(bytes: &byteRate, count: 4))
+    var blockAlign = UInt16(2).littleEndian  // 1 * 2
+    header.append(Data(bytes: &blockAlign, count: 2))
+    var bitsPerSample = UInt16(16).littleEndian
+    header.append(Data(bytes: &bitsPerSample, count: 2))
+    // data sub-chunk
+    header.append(contentsOf: "data".utf8)
+    var dataChunkSize = dataSize.littleEndian
+    header.append(Data(bytes: &dataChunkSize, count: 4))
+    handle.seek(toFileOffset: 0)
+    handle.write(header)
+}
+
 // MARK: - App Delegate
 
 class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     var statusItem: NSStatusItem!
     var appState: AppState = .idle
-    var recProcess: Process?
+    var audioEngine: AVAudioEngine?
+    var audioFileHandle: FileHandle?
+    var audioDataSize: UInt32 = 0
+    var currentAudioLevel: Float = 0.0  // Exposed for waveform overlay (Plan 03)
     var audioFile: String?
     var previousApp: NSRunningApplication?  // saved before recording to refocus for paste
 
@@ -1669,7 +1706,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         if FileManager.default.fileExists(atPath: bundled) { return bundled }
         return "/opt/homebrew/bin/whisper-cli"
     }
-    let recPath = "/opt/homebrew/bin/rec"
     let afplayPath = "/usr/bin/afplay"
 
     let inputMonitor = InputMonitor()
@@ -1865,7 +1901,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // Save the currently focused app so we can refocus it before pasting
         previousApp = NSWorkspace.shared.frontmostApplication
 
-        // Show feedback immediately — before process launch
+        // Show feedback immediately — before engine start
         appState = .recording
         inputMonitor.setRecording(true)
         updateIcon()
@@ -1875,16 +1911,82 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         let tempFile = NSTemporaryDirectory() + "voice_\(ProcessInfo.processInfo.globallyUniqueString).wav"
         audioFile = tempFile
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: recPath)
-        process.arguments = ["-r", "16000", "-c", "1", "-b", "16", tempFile]
-        process.standardError = FileHandle.nullDevice
-        process.standardOutput = FileHandle.nullDevice
+        // Create WAV file with 44-byte placeholder header
+        FileManager.default.createFile(atPath: tempFile, contents: Data(count: 44))
+        guard let handle = FileHandle(forWritingAtPath: tempFile) else {
+            appState = .idle
+            inputMonitor.setRecording(false)
+            updateIcon()
+            hideOverlay()
+            showNotification(title: "Voice", body: "Failed to create audio file")
+            return
+        }
+        handle.seek(toFileOffset: 44)
+        audioFileHandle = handle
+        audioDataSize = 0
 
+        let engine = AVAudioEngine()
+        let inputNode = engine.inputNode
+        let hwFormat = inputNode.outputFormat(forBus: 0)
+        guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true) else {
+            appState = .idle
+            inputMonitor.setRecording(false)
+            updateIcon()
+            hideOverlay()
+            showNotification(title: "Voice", body: "Failed to create audio format")
+            return
+        }
+
+        guard let converter = AVAudioConverter(from: hwFormat, to: targetFormat) else {
+            appState = .idle
+            inputMonitor.setRecording(false)
+            updateIcon()
+            hideOverlay()
+            showNotification(title: "Voice", body: "Failed to create audio converter")
+            return
+        }
+
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] buffer, _ in
+            guard let self = self else { return }
+            // Convert to 16kHz mono Int16
+            let ratio = 16000.0 / hwFormat.sampleRate
+            let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio)
+            guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: max(capacity, 1)) else { return }
+            var error: NSError?
+            let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
+                outStatus.pointee = .haveData
+                return buffer
+            }
+            converter.convert(to: convertedBuffer, error: &error, withInputFrom: inputBlock)
+            if error == nil, let channelData = convertedBuffer.int16ChannelData {
+                let frameCount = Int(convertedBuffer.frameLength)
+                let data = Data(bytes: channelData[0], count: frameCount * 2)
+                self.audioFileHandle?.write(data)
+                self.audioDataSize += UInt32(frameCount * 2)
+            }
+            // Calculate RMS level for waveform visualization
+            if let floatData = buffer.floatChannelData {
+                var sum: Float = 0
+                let count = Int(buffer.frameLength)
+                for i in 0..<count {
+                    let sample = floatData[0][i]
+                    sum += sample * sample
+                }
+                let rms = sqrt(sum / Float(max(count, 1)))
+                DispatchQueue.main.async {
+                    self.currentAudioLevel = rms
+                }
+            }
+        }
+
+        engine.prepare()
         do {
-            try process.run()
-            recProcess = process
+            try engine.start()
+            self.audioEngine = engine
         } catch {
+            inputNode.removeTap(onBus: 0)
+            audioFileHandle?.closeFile()
+            audioFileHandle = nil
             appState = .idle
             inputMonitor.setRecording(false)
             updateIcon()
@@ -1895,11 +1997,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     func stopRecording() {
         guard case .recording = appState else { return }
-        guard let process = recProcess, process.isRunning else { return }
 
-        process.terminate()
-        process.waitUntilExit()
-        recProcess = nil
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine?.stop()
+        audioEngine = nil
+        // Finalize WAV header with actual data size
+        if let handle = audioFileHandle {
+            writeWAVHeader(to: handle, dataSize: audioDataSize)
+            handle.closeFile()
+        }
+        audioFileHandle = nil
+
         appState = .processing
         inputMonitor.setRecording(false)
         updateIcon()
@@ -1920,11 +2028,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             return
         }
 
-        if let process = recProcess, process.isRunning {
-            process.terminate()
-            process.waitUntilExit()
-        }
-        recProcess = nil
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine?.stop()
+        audioEngine = nil
+        audioFileHandle?.closeFile()
+        audioFileHandle = nil
 
         if let file = audioFile {
             cleanup(file)
@@ -1945,7 +2053,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         previousApp = NSWorkspace.shared.frontmostApplication
 
-        // Show feedback immediately — before process launch
+        // Show feedback immediately — before engine start
         appState = .popo
         inputMonitor.setRecording(true)
         inputMonitor.setPopo(true)
@@ -1956,15 +2064,72 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         let tempFile = NSTemporaryDirectory() + "voice_\(ProcessInfo.processInfo.globallyUniqueString).wav"
         audioFile = tempFile
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: recPath)
-        process.arguments = ["-r", "16000", "-c", "1", "-b", "16", tempFile]
-        process.standardError = FileHandle.nullDevice
-        process.standardOutput = FileHandle.nullDevice
+        // Create WAV file with 44-byte placeholder header
+        FileManager.default.createFile(atPath: tempFile, contents: Data(count: 44))
+        guard let handle = FileHandle(forWritingAtPath: tempFile) else {
+            appState = .idle
+            inputMonitor.setRecording(false)
+            inputMonitor.setPopo(false)
+            updateIcon()
+            hideOverlay()
+            showNotification(title: "Voice", body: "Failed to create audio file")
+            return
+        }
+        handle.seek(toFileOffset: 44)
+        audioFileHandle = handle
+        audioDataSize = 0
 
+        let engine = AVAudioEngine()
+        let inputNode = engine.inputNode
+        let hwFormat = inputNode.outputFormat(forBus: 0)
+        guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true),
+              let converter = AVAudioConverter(from: hwFormat, to: targetFormat) else {
+            audioFileHandle?.closeFile()
+            audioFileHandle = nil
+            appState = .idle
+            inputMonitor.setRecording(false)
+            inputMonitor.setPopo(false)
+            updateIcon()
+            hideOverlay()
+            showNotification(title: "Voice", body: "Failed to create audio converter")
+            return
+        }
+
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] buffer, _ in
+            guard let self = self else { return }
+            let ratio = 16000.0 / hwFormat.sampleRate
+            let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio)
+            guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: max(capacity, 1)) else { return }
+            var error: NSError?
+            let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
+                outStatus.pointee = .haveData
+                return buffer
+            }
+            converter.convert(to: convertedBuffer, error: &error, withInputFrom: inputBlock)
+            if error == nil, let channelData = convertedBuffer.int16ChannelData {
+                let frameCount = Int(convertedBuffer.frameLength)
+                let data = Data(bytes: channelData[0], count: frameCount * 2)
+                self.audioFileHandle?.write(data)
+                self.audioDataSize += UInt32(frameCount * 2)
+            }
+            if let floatData = buffer.floatChannelData {
+                var sum: Float = 0
+                let count = Int(buffer.frameLength)
+                for i in 0..<count {
+                    let sample = floatData[0][i]
+                    sum += sample * sample
+                }
+                let rms = sqrt(sum / Float(max(count, 1)))
+                DispatchQueue.main.async {
+                    self.currentAudioLevel = rms
+                }
+            }
+        }
+
+        engine.prepare()
         do {
-            try process.run()
-            recProcess = process
+            try engine.start()
+            self.audioEngine = engine
 
             // Safety timeout
             let timeout = Settings.shared.popoTimeoutSeconds
@@ -1975,6 +2140,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 }
             }
         } catch {
+            inputNode.removeTap(onBus: 0)
+            audioFileHandle?.closeFile()
+            audioFileHandle = nil
             appState = .idle
             inputMonitor.setRecording(false)
             inputMonitor.setPopo(false)
@@ -1991,7 +2159,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         popoTimer = nil
         inputMonitor.setPopo(false)
 
-        guard let process = recProcess, process.isRunning else {
+        guard audioEngine != nil else {
             appState = .idle
             inputMonitor.setRecording(false)
             updateIcon()
@@ -1999,9 +2167,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             return
         }
 
-        process.terminate()
-        process.waitUntilExit()
-        recProcess = nil
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine?.stop()
+        audioEngine = nil
+        // Finalize WAV header with actual data size
+        if let handle = audioFileHandle {
+            writeWAVHeader(to: handle, dataSize: audioDataSize)
+            handle.closeFile()
+        }
+        audioFileHandle = nil
+
         appState = .processing
         inputMonitor.setRecording(false)
         updateIcon()
@@ -2018,11 +2193,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         popoTimer = nil
         inputMonitor.setPopo(false)
 
-        if let process = recProcess, process.isRunning {
-            process.terminate()
-            process.waitUntilExit()
-        }
-        recProcess = nil
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine?.stop()
+        audioEngine = nil
+        audioFileHandle?.closeFile()
+        audioFileHandle = nil
 
         if let file = audioFile {
             cleanup(file)
@@ -2204,9 +2379,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
         popoTimer?.invalidate()
         inputMonitor.stop()
-        if let process = recProcess, process.isRunning {
-            process.terminate()
-        }
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine?.stop()
+        audioEngine = nil
+        audioFileHandle?.closeFile()
+        audioFileHandle = nil
         if let file = audioFile {
             cleanup(file)
         }
