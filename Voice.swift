@@ -191,14 +191,6 @@ class Settings {
         set { defaults.set(newValue, forKey: "overlayShowTimer") }
     }
 
-    var overlayBackgroundOpacity: CGFloat {
-        get {
-            let val = defaults.double(forKey: "overlayBackgroundOpacity")
-            return val > 0 || defaults.object(forKey: "overlayBackgroundOpacity") != nil ? CGFloat(val) : 0.85
-        }
-        set { defaults.set(Double(newValue), forKey: "overlayBackgroundOpacity") }
-    }
-
     var overlayEnabled: Bool {
         get { defaults.object(forKey: "overlayEnabled") == nil ? true : defaults.bool(forKey: "overlayEnabled") }
         set { defaults.set(newValue, forKey: "overlayEnabled") }
@@ -599,14 +591,9 @@ class OverlayPreviewView: NSView {
     var fontSize: CGFloat = 11.0
 
     override func draw(_ dirtyRect: NSRect) {
-        if !Settings.shared.overlayEnabled { return }
-
-        let bgOpacity = Settings.shared.overlayBackgroundOpacity
-        if bgOpacity > 0 {
-            let pill = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 12, yRadius: 12)
-            NSColor(white: 0.1, alpha: bgOpacity).setFill()
-            pill.fill()
-        }
+        let pill = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 12, yRadius: 12)
+        NSColor(white: 0.1, alpha: 0.85).setFill()
+        pill.fill()
 
         let textAttrs: [NSAttributedString.Key: Any] = [
             .foregroundColor: NSColor.white,
@@ -695,32 +682,9 @@ class OverlayWindow: NSWindow {
 
     func positionOnScreen() {
         guard let screen = NSScreen.main else { return }
-        guard let cv = contentView as? OverlayContentView else { return }
-
-        let fontSize = Settings.shared.overlayFontSize
-        let padding: CGFloat = 24  // left + right padding
-
-        // Calculate content width based on enabled elements
-        var contentWidth: CGFloat = 8 + 6  // dot + gap
-        if Settings.shared.overlayShowAppIcon { contentWidth += 16 + 4 }
-        if Settings.shared.overlayShowAppName, !cv.targetAppName.isEmpty {
-            let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: fontSize - 1)]
-            let nameW = min((cv.targetAppName as NSString).size(withAttributes: attrs).width, 80)
-            contentWidth += nameW + 8
-        }
-        contentWidth += 35 + 8  // waveform + gap
-        if Settings.shared.overlayShowTimer { contentWidth += 40 }
-
-        let w = contentWidth + padding
-        let h = max(fontSize * 2.4, 28)  // height based on font size
-
-        let newFrame = NSRect(x: 0, y: 0, width: w, height: h)
-        setFrame(newFrame, display: true)
-        contentView?.frame = NSRect(x: 0, y: 0, width: w, height: h)
-        hasShadow = Settings.shared.overlayBackgroundOpacity > 0
         let screenFrame = screen.visibleFrame
-        let x = screenFrame.midX - w / 2
-        let y = screenFrame.maxY - h - 12
+        let x = screenFrame.midX - frame.width / 2
+        let y = screenFrame.maxY - frame.height - 12
         setFrameOrigin(NSPoint(x: x, y: y))
     }
 }
@@ -800,12 +764,9 @@ class OverlayContentView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         // Background pill
-        let bgOpacity = Settings.shared.overlayBackgroundOpacity
-        if bgOpacity > 0 {
-            let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 12, yRadius: 12)
-            NSColor(white: 0.1, alpha: bgOpacity).setFill()
-            path.fill()
-        }
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 12, yRadius: 12)
+        NSColor(white: 0.1, alpha: 0.85).setFill()
+        path.fill()
 
         switch overlayState {
         case .recording, .popo:
@@ -2204,7 +2165,7 @@ class SettingsWindowController {
         }
 
         let w = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 380),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -2253,8 +2214,7 @@ class SettingsViewController: NSViewController {
     private var overlayEnabledCheckbox: NSButton!
     private var overlayAppNameCheckbox: NSButton!
     private var overlayAppIconCheckbox: NSButton!
-    private var overlayBgSlider: NSSlider!
-    private var overlayBgLabel: NSTextField!
+    private var overlayWindowTitleCheckbox: NSButton!
     private var overlayTimerCheckbox: NSButton!
     private var overlayFontSizeSlider: NSSlider!
     private var overlayFontSizeLabel: NSTextField!
@@ -2370,79 +2330,71 @@ class SettingsViewController: NSViewController {
     private func makeAudioTab() -> NSTabViewItem {
         let item = NSTabViewItem(identifier: "audio")
         item.label = "Audio"
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 450, height: 350))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 450, height: 300))
 
-        var y: CGFloat = 280
+        var y: CGFloat = 260
 
         // Microphone selector
         addLabel("Microphone:", at: NSPoint(x: 20, y: y), in: container)
-        micPopup = NSPopUpButton(frame: NSRect(x: 140, y: y - 2, width: 280, height: 26), pullsDown: false)
+        micPopup = NSPopUpButton(frame: NSRect(x: 180, y: y - 2, width: 240, height: 26), pullsDown: false)
         micPopup.target = self
         micPopup.action = #selector(micChanged)
         container.addSubview(micPopup)
         refreshMicList()
 
-        y -= 22
+        y -= 26
         micStatusLabel = NSTextField(labelWithString: "")
-        micStatusLabel.frame = NSRect(x: 140, y: y, width: 280, height: 16)
+        micStatusLabel.frame = NSRect(x: 180, y: y, width: 240, height: 16)
         micStatusLabel.font = NSFont.systemFont(ofSize: 10)
         micStatusLabel.textColor = .secondaryLabelColor
         container.addSubview(micStatusLabel)
 
-        y -= 32
+        y -= 40
 
-        // Overlay section header
-        overlayEnabledCheckbox = NSButton(checkboxWithTitle: "Show overlay", target: self, action: #selector(overlaySettingChanged))
-        overlayEnabledCheckbox.frame = NSRect(x: 20, y: y, width: 130, height: 22)
+        // Overlay display options
+        overlayEnabledCheckbox = NSButton(checkboxWithTitle: "Show overlay bubble", target: self, action: #selector(overlaySettingChanged))
+        overlayEnabledCheckbox.frame = NSRect(x: 20, y: y, width: 200, height: 22)
         overlayEnabledCheckbox.state = Settings.shared.overlayEnabled ? .on : .off
         container.addSubview(overlayEnabledCheckbox)
-        y -= 26
+        y -= 30
 
-        // Overlay toggles row
-        overlayAppNameCheckbox = NSButton(checkboxWithTitle: "App name", target: self, action: #selector(overlaySettingChanged))
-        overlayAppNameCheckbox.frame = NSRect(x: 40, y: y, width: 95, height: 22)
+        overlayAppNameCheckbox = NSButton(checkboxWithTitle: "Show app name", target: self, action: #selector(overlaySettingChanged))
+        overlayAppNameCheckbox.frame = NSRect(x: 40, y: y, width: 200, height: 22)
         overlayAppNameCheckbox.state = Settings.shared.overlayShowAppName ? .on : .off
         container.addSubview(overlayAppNameCheckbox)
+        y -= 28
 
-        overlayAppIconCheckbox = NSButton(checkboxWithTitle: "App icon", target: self, action: #selector(overlaySettingChanged))
-        overlayAppIconCheckbox.frame = NSRect(x: 140, y: y, width: 90, height: 22)
+        overlayAppIconCheckbox = NSButton(checkboxWithTitle: "Show app icon", target: self, action: #selector(overlaySettingChanged))
+        overlayAppIconCheckbox.frame = NSRect(x: 40, y: y, width: 200, height: 22)
         overlayAppIconCheckbox.state = Settings.shared.overlayShowAppIcon ? .on : .off
         container.addSubview(overlayAppIconCheckbox)
+        y -= 28
 
-        overlayTimerCheckbox = NSButton(checkboxWithTitle: "Timer", target: self, action: #selector(overlaySettingChanged))
-        overlayTimerCheckbox.frame = NSRect(x: 235, y: y, width: 70, height: 22)
+        overlayWindowTitleCheckbox = NSButton(checkboxWithTitle: "Show window title", target: self, action: #selector(overlaySettingChanged))
+        overlayWindowTitleCheckbox.frame = NSRect(x: 40, y: y, width: 200, height: 22)
+        overlayWindowTitleCheckbox.state = Settings.shared.overlayShowWindowTitle ? .on : .off
+        container.addSubview(overlayWindowTitleCheckbox)
+        y -= 28
+
+        overlayTimerCheckbox = NSButton(checkboxWithTitle: "Show recording timer", target: self, action: #selector(overlaySettingChanged))
+        overlayTimerCheckbox.frame = NSRect(x: 40, y: y, width: 200, height: 22)
         overlayTimerCheckbox.state = Settings.shared.overlayShowTimer ? .on : .off
         container.addSubview(overlayTimerCheckbox)
-        y -= 26
 
-        // Slider rows
-        addLabel("Background:", at: NSPoint(x: 40, y: y + 2), in: container)
-        overlayBgSlider = NSSlider(value: Double(Settings.shared.overlayBackgroundOpacity * 100), minValue: 0, maxValue: 100, target: self, action: #selector(overlayBgChanged))
-        overlayBgSlider.frame = NSRect(x: 140, y: y, width: 120, height: 22)
-        container.addSubview(overlayBgSlider)
-        overlayBgLabel = NSTextField(labelWithString: "\(Int(Settings.shared.overlayBackgroundOpacity * 100))%")
-        overlayBgLabel.frame = NSRect(x: 265, y: y + 2, width: 40, height: 18)
-        overlayBgLabel.font = NSFont.systemFont(ofSize: 11)
-        overlayBgLabel.textColor = .secondaryLabelColor
-        container.addSubview(overlayBgLabel)
-        y -= 24
-
+        y -= 30
         addLabel("Font size:", at: NSPoint(x: 40, y: y + 2), in: container)
         overlayFontSizeSlider = NSSlider(value: Double(Settings.shared.overlayFontSize), minValue: 8, maxValue: 18, target: self, action: #selector(overlayFontSizeChanged))
-        overlayFontSizeSlider.frame = NSRect(x: 140, y: y, width: 120, height: 22)
+        overlayFontSizeSlider.frame = NSRect(x: 120, y: y, width: 120, height: 22)
         container.addSubview(overlayFontSizeSlider)
         overlayFontSizeLabel = NSTextField(labelWithString: "\(Int(Settings.shared.overlayFontSize))pt")
-        overlayFontSizeLabel.frame = NSRect(x: 265, y: y + 2, width: 40, height: 18)
+        overlayFontSizeLabel.frame = NSRect(x: 245, y: y + 2, width: 40, height: 18)
         overlayFontSizeLabel.font = NSFont.systemFont(ofSize: 11)
         overlayFontSizeLabel.textColor = .secondaryLabelColor
         container.addSubview(overlayFontSizeLabel)
-        y -= 30
 
-        // Preview — auto-sized to match content
-        let fontSize = Settings.shared.overlayFontSize
-        let previewH = max(fontSize * 2.4, 28)
-        overlayPreview = OverlayPreviewView(frame: NSRect(x: 40, y: y - previewH, width: 370, height: previewH))
-        overlayPreview.fontSize = fontSize
+        y -= 50
+        overlayPreview = OverlayPreviewView(frame: NSRect(x: 40, y: y, width: 260, height: 40))
+        overlayPreview.fontSize = Settings.shared.overlayFontSize
         container.addSubview(overlayPreview)
 
         item.view = container
@@ -2487,15 +2439,8 @@ class SettingsViewController: NSViewController {
         Settings.shared.overlayEnabled = overlayEnabledCheckbox.state == .on
         Settings.shared.overlayShowAppName = overlayAppNameCheckbox.state == .on
         Settings.shared.overlayShowAppIcon = overlayAppIconCheckbox.state == .on
-        // overlayBgSlider handled by its own action
+        Settings.shared.overlayShowWindowTitle = overlayWindowTitleCheckbox.state == .on
         Settings.shared.overlayShowTimer = overlayTimerCheckbox.state == .on
-        overlayPreview.needsDisplay = true
-    }
-
-    @objc private func overlayBgChanged() {
-        let pct = Int(overlayBgSlider.doubleValue)
-        Settings.shared.overlayBackgroundOpacity = CGFloat(pct) / 100.0
-        overlayBgLabel.stringValue = "\(pct)%"
         overlayPreview.needsDisplay = true
     }
 
@@ -2504,9 +2449,6 @@ class SettingsViewController: NSViewController {
         Settings.shared.overlayFontSize = size
         overlayFontSizeLabel.stringValue = "\(Int(size))pt"
         overlayPreview.fontSize = size
-        let newH = max(size * 2.4, 28)
-        let originY = overlayPreview.frame.origin.y + overlayPreview.frame.height - newH
-        overlayPreview.frame = NSRect(x: 40, y: originY, width: 370, height: newH)
         overlayPreview.needsDisplay = true
     }
 
@@ -3123,7 +3065,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     var statusItem: NSStatusItem!
     var appState: AppState = .idle
     var audioEngine: AVAudioEngine?
-    var isRestartingEngine = false
     var audioFileHandle: FileHandle?
     var audioDataSize: UInt32 = 0
     var currentAudioLevel: Float = 0.0  // Exposed for waveform overlay (Plan 03)
@@ -3323,10 +3264,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             &defaultDeviceAddr,
             DispatchQueue.main
         ) { [weak self] _, _ in
-            guard let self = self else { return }
-            // Debounce — AVAudioEngine setup itself can trigger device change notifications
-            if self.isRestartingEngine { return }
             NSLog("Voice: default input device changed")
+            guard let self = self else { return }
             // If currently recording, restart the engine with the new device
             if case .recording = self.appState {
                 NSLog("Voice: restarting engine mid-recording due to device change")
@@ -3336,6 +3275,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 // Small delay for the new device to settle
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     if case .recording = self.appState {
+                        // Re-init engine on current audio data (append to same file)
                         self.restartRecordingEngine()
                     }
                 }
@@ -3666,8 +3606,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     // Re-create AVAudioEngine mid-recording after device change (Bluetooth reconnect)
     func restartRecordingEngine() {
-        isRestartingEngine = true
-        defer { DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.isRestartingEngine = false } }
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
 
