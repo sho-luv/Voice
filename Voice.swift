@@ -57,6 +57,10 @@ class Settings {
             "apiKeyOpenAI": "",
             "apiKeyAnthropic": "",
             "whisperModel": "large-v3-turbo-q5_0",
+            "overlayShowAppName": true,
+            "overlayShowAppIcon": true,
+            "overlayShowWindowTitle": false,
+            "overlayShowTimer": true,
         ])
     }
 
@@ -157,6 +161,26 @@ class Settings {
         if FileManager.default.fileExists(atPath: bundled) { return bundled }
         // 2. Fall back to Application Support
         return NSHomeDirectory() + "/Library/Application Support/Voice/Models/ggml-\(whisperModel).bin"
+    }
+
+    var overlayShowAppName: Bool {
+        get { defaults.bool(forKey: "overlayShowAppName") }
+        set { defaults.set(newValue, forKey: "overlayShowAppName") }
+    }
+
+    var overlayShowAppIcon: Bool {
+        get { defaults.bool(forKey: "overlayShowAppIcon") }
+        set { defaults.set(newValue, forKey: "overlayShowAppIcon") }
+    }
+
+    var overlayShowWindowTitle: Bool {
+        get { defaults.bool(forKey: "overlayShowWindowTitle") }
+        set { defaults.set(newValue, forKey: "overlayShowWindowTitle") }
+    }
+
+    var overlayShowTimer: Bool {
+        get { defaults.bool(forKey: "overlayShowTimer") }
+        set { defaults.set(newValue, forKey: "overlayShowTimer") }
     }
 
     private func updateLaunchAgent(enabled: Bool) {
@@ -442,7 +466,7 @@ class InputMonitor {
 
 class OverlayWindow: NSWindow {
     init() {
-        let frame = NSRect(x: 0, y: 0, width: 220, height: 44)
+        let frame = NSRect(x: 0, y: 0, width: 280, height: 64)
         super.init(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
         self.level = .floating
         self.backgroundColor = .clear
@@ -481,9 +505,20 @@ class OverlayContentView: NSView {
         didSet { needsDisplay = true }
     }
 
-    private var pulseTimer: Timer?
-    private var pulseAlpha: CGFloat = 1.0
-    private var pulseDirection: CGFloat = -1
+    // Waveform state (WhatsApp-inspired animated bars)
+    var audioLevels: [Float] = Array(repeating: 0.0, count: 6)  // 6 bars
+    private var animationTimer: Timer?
+
+    // Timer state
+    var recordingStartTime: Date?
+    private var elapsedTimer: Timer?
+
+    // App context (shown in overlay per D-14, D-15)
+    var targetAppName: String = ""
+    var targetAppIcon: NSImage?
+
+    // Reference to app delegate for reading audio levels
+    weak var appDelegate: AppDelegate?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -494,75 +529,142 @@ class OverlayContentView: NSView {
         fatalError("init(coder:) not implemented")
     }
 
-    func startPulse() {
-        pulseTimer?.invalidate()
-        pulseTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            self.pulseAlpha += self.pulseDirection * 0.04
-            if self.pulseAlpha <= 0.3 { self.pulseDirection = 1 }
-            if self.pulseAlpha >= 1.0 { self.pulseDirection = -1 }
+    func startAnimation() {
+        animationTimer?.invalidate()
+        elapsedTimer?.invalidate()
+        recordingStartTime = Date()
+
+        // Waveform animation at 20fps — reads currentAudioLevel from AppDelegate
+        animationTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 20.0, repeats: true) { [weak self] _ in
+            guard let self = self, let delegate = self.appDelegate else { return }
+            let level = delegate.currentAudioLevel
+
+            // Smooth shift: each bar blends toward the next, new sample lands at end
+            for i in 0..<(self.audioLevels.count - 1) {
+                self.audioLevels[i] = self.audioLevels[i] * 0.7 + self.audioLevels[i + 1] * 0.3
+            }
+            // Amplify for visual impact (raw RMS is small) and smooth into last bar
+            let amplified = min(Float(1.0), level * 8.0)
+            self.audioLevels[self.audioLevels.count - 1] = self.audioLevels[self.audioLevels.count - 1] * 0.5 + amplified * 0.5
+
             self.needsDisplay = true
+        }
+
+        // Elapsed time redraw every second
+        elapsedTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.needsDisplay = true
         }
     }
 
-    func stopPulse() {
-        pulseTimer?.invalidate()
-        pulseTimer = nil
-        pulseAlpha = 1.0
+    func stopAnimation() {
+        animationTimer?.invalidate()
+        animationTimer = nil
+        elapsedTimer?.invalidate()
+        elapsedTimer = nil
+        recordingStartTime = nil
+        audioLevels = Array(repeating: 0.0, count: 6)
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        // Background pill
         let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 12, yRadius: 12)
         NSColor(white: 0.1, alpha: 0.85).setFill()
         path.fill()
 
+        switch overlayState {
+        case .recording, .popo:
+            drawRecordingOverlay()
+        case .transcribing:
+            drawCenteredText(icon: "\u{23F3}", text: "Transcribing...")
+        case .done(let preview):
+            let truncated = preview.count > 30 ? String(preview.prefix(30)) + "..." : preview
+            drawCenteredText(icon: "\u{2713}", text: truncated)
+        case .error(let msg):
+            let truncated = msg.count > 30 ? String(msg.prefix(30)) + "..." : msg
+            drawCenteredText(icon: "\u{2717}", text: truncated)
+        }
+    }
+
+    private func drawCenteredText(icon: String, text: String) {
         let attrs: [NSAttributedString.Key: Any] = [
             .foregroundColor: NSColor.white,
             .font: NSFont.systemFont(ofSize: 13, weight: .medium)
         ]
-
-        let text: String
-        let indicator: String
-
-        switch overlayState {
-        case .recording:
-            indicator = "\u{25CF}"  // filled circle
-            text = " Recording..."
-            // Draw pulsing red dot
-            let dotRect = NSRect(x: 14, y: bounds.midY - 5, width: 10, height: 10)
-            NSColor(red: 1.0, green: 0.2, blue: 0.2, alpha: pulseAlpha).setFill()
-            NSBezierPath(ovalIn: dotRect).fill()
-            let textPoint = NSPoint(x: 30, y: bounds.midY - 8)
-            text.draw(at: textPoint, withAttributes: attrs)
-            return
-
-        case .popo:
-            indicator = "\u{25CF}"
-            text = " POPO Mode..."
-            let dotRect = NSRect(x: 14, y: bounds.midY - 5, width: 10, height: 10)
-            NSColor(red: 0.2, green: 0.8, blue: 1.0, alpha: pulseAlpha).setFill()
-            NSBezierPath(ovalIn: dotRect).fill()
-            let textPoint = NSPoint(x: 30, y: bounds.midY - 8)
-            text.draw(at: textPoint, withAttributes: attrs)
-            return
-
-        case .transcribing:
-            indicator = "\u{23F3}"
-            text = " Transcribing..."
-        case .done(let preview):
-            indicator = "\u{2713}"
-            let truncated = preview.count > 25 ? String(preview.prefix(25)) + "..." : preview
-            text = " " + truncated
-        case .error(let msg):
-            indicator = "\u{2717}"
-            let truncated = msg.count > 25 ? String(msg.prefix(25)) + "..." : msg
-            text = " " + truncated
-        }
-
-        let fullText = indicator + text
+        let fullText = icon + " " + text
         let size = fullText.size(withAttributes: attrs)
         let textPoint = NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2)
         fullText.draw(at: textPoint, withAttributes: attrs)
+    }
+
+    private func drawRecordingOverlay() {
+        var x: CGFloat = 12
+
+        // Red dot (recording) or blue dot (POPO)
+        let dotColor: NSColor = (overlayState == .recording)
+            ? NSColor(red: 1.0, green: 0.2, blue: 0.2, alpha: 1.0)
+            : NSColor(red: 0.2, green: 0.8, blue: 1.0, alpha: 1.0)
+        let dotSize: CGFloat = 8
+        let dotRect = NSRect(x: x, y: bounds.midY - dotSize / 2, width: dotSize, height: dotSize)
+        dotColor.setFill()
+        NSBezierPath(ovalIn: dotRect).fill()
+        x += dotSize + 6
+
+        let textAttrs: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor.white,
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium)
+        ]
+        let smallAttrs: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor(white: 0.7, alpha: 1.0),
+            .font: NSFont.systemFont(ofSize: 10, weight: .regular)
+        ]
+
+        // App icon (per D-14, D-15)
+        if Settings.shared.overlayShowAppIcon, let icon = targetAppIcon {
+            let iconSize: CGFloat = 16
+            let iconRect = NSRect(x: x, y: bounds.midY - iconSize / 2, width: iconSize, height: iconSize)
+            icon.draw(in: iconRect)
+            x += iconSize + 4
+        }
+
+        // App name (per D-14)
+        if Settings.shared.overlayShowAppName, !targetAppName.isEmpty {
+            let nameStr = targetAppName as NSString
+            let nameSize = nameStr.size(withAttributes: smallAttrs)
+            let namePoint = NSPoint(x: x, y: bounds.midY - nameSize.height / 2)
+            nameStr.draw(at: namePoint, withAttributes: smallAttrs)
+            x += min(nameSize.width, 60) + 8  // cap app name width to avoid overflow
+        }
+
+        // Waveform bars — always shown (per D-17)
+        let barCount = audioLevels.count
+        let barWidth: CGFloat = 3.0
+        let barGap: CGFloat = 2.0
+        let maxBarHeight: CGFloat = bounds.height * 0.6
+        let minBarHeight: CGFloat = 3.0
+        let waveformWidth = CGFloat(barCount) * barWidth + CGFloat(barCount - 1) * barGap
+
+        let waveformX = x
+        for i in 0..<barCount {
+            let level = CGFloat(audioLevels[i])
+            let barHeight = max(minBarHeight, level * maxBarHeight)
+            let bx = waveformX + CGFloat(i) * (barWidth + barGap)
+            let by = bounds.midY - barHeight / 2
+            let barRect = NSRect(x: bx, y: by, width: barWidth, height: barHeight)
+            NSColor.white.withAlphaComponent(0.9).setFill()
+            NSBezierPath(roundedRect: barRect, xRadius: barWidth / 2, yRadius: barWidth / 2).fill()
+        }
+        x = waveformX + waveformWidth + 8
+
+        // Elapsed timer (per D-13)
+        if Settings.shared.overlayShowTimer, let startTime = recordingStartTime {
+            let elapsed = Int(Date().timeIntervalSince(startTime))
+            let minutes = elapsed / 60
+            let seconds = elapsed % 60
+            let timerStr = String(format: "%d:%02d", minutes, seconds) as NSString
+            let timerSize = timerStr.size(withAttributes: textAttrs)
+            let timerPoint = NSPoint(x: x, y: bounds.midY - timerSize.height / 2)
+            timerStr.draw(at: timerPoint, withAttributes: textAttrs)
+        }
     }
 }
 
@@ -1867,12 +1969,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         guard let contentView = overlayWindow.contentView as? OverlayContentView else { return }
         contentView.overlayState = state
+        contentView.appDelegate = self
 
         switch state {
         case .recording, .popo:
-            contentView.startPulse()
+            // Pass target app context (per D-14, D-15)
+            if let app = previousApp {
+                contentView.targetAppName = app.localizedName ?? ""
+                contentView.targetAppIcon = app.icon
+            } else {
+                contentView.targetAppName = ""
+                contentView.targetAppIcon = nil
+            }
+            contentView.startAnimation()
         default:
-            contentView.stopPulse()
+            contentView.stopAnimation()
+            contentView.targetAppName = ""
+            contentView.targetAppIcon = nil
         }
 
         overlayWindow.positionOnScreen()
@@ -1882,7 +1995,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     func hideOverlay() {
         dismissTimer?.invalidate()
         dismissTimer = nil
-        (overlayWindow.contentView as? OverlayContentView)?.stopPulse()
+        (overlayWindow.contentView as? OverlayContentView)?.stopAnimation()
         overlayWindow.orderOut(nil)
     }
 
