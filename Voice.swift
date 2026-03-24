@@ -2002,7 +2002,7 @@ func writeWAVHeader(to handle: FileHandle, dataSize: UInt32) {
 
 // MARK: - App Delegate
 
-class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     var appState: AppState = .idle
     var audioEngine: AVAudioEngine?
@@ -2065,17 +2065,49 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         updateIcon()
 
         let menu = NSMenu()
+        menu.delegate = self
+
+        // Shortcuts reference
         let hotkeyName = hotkeyOptions[Settings.shared.hotkeyIndex].name
-        menu.addItem(NSMenuItem(title: "\(hotkeyName) = Push-to-Talk", action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Space+\(hotkeyName) = POPO Mode", action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Escape = Cancel", action: nil, keyEquivalent: ""))
+        let shortcutsHeader = NSMenuItem(title: "Shortcuts", action: nil, keyEquivalent: "")
+        shortcutsHeader.isEnabled = false
+        menu.addItem(shortcutsHeader)
+        let pttItem = NSMenuItem(title: "  Push-to-Talk", action: nil, keyEquivalent: "")
+        pttItem.isEnabled = false
+        if #available(macOS 14.0, *) { pttItem.image = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: nil) }
+        let pttKey = NSMenuItem(title: hotkeyName, action: nil, keyEquivalent: "")
+        pttKey.isEnabled = false
+        menu.addItem(pttItem)
+        let popoItem = NSMenuItem(title: "  POPO Mode", action: nil, keyEquivalent: "")
+        popoItem.isEnabled = false
+        if #available(macOS 14.0, *) { popoItem.image = NSImage(systemSymbolName: "mic.badge.plus", accessibilityDescription: nil) }
+        menu.addItem(popoItem)
+
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Paste Last", action: #selector(pasteLast), keyEquivalent: "v"))
+
+        // Actions
+        let pasteItem = NSMenuItem(title: "Paste Last Transcription", action: #selector(pasteLast), keyEquivalent: "v")
+        if #available(macOS 14.0, *) { pasteItem.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: nil) }
+        menu.addItem(pasteItem)
+
         menu.addItem(NSMenuItem.separator())
-        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ",")
+
+        // Microphone submenu
+        let micItem = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
+        if #available(macOS 14.0, *) { micItem.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: nil) }
+        let micSubmenu = NSMenu()
+        micItem.submenu = micSubmenu
+        menu.addItem(micItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        // Settings & Quit
+        let settingsItem = NSMenuItem(title: "Settings\u{2026}", action: #selector(openSettings), keyEquivalent: ",")
+        if #available(macOS 14.0, *) { settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil) }
         menu.addItem(settingsItem)
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Quit Voice", action: #selector(quitApp), keyEquivalent: "q"))
+        let quitItem = NSMenuItem(title: "Quit Voice", action: #selector(quitApp), keyEquivalent: "q")
+        menu.addItem(quitItem)
         statusItem.menu = menu
 
         // Link text injector to input monitor so it can disable event tap during paste
@@ -2764,6 +2796,36 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     @objc func openSettings() {
         SettingsWindowController.shared.show()
+    }
+
+    // NSMenuDelegate — rebuild mic submenu each time menu opens
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        for item in menu.items {
+            if item.title == "Microphone", let submenu = item.submenu {
+                submenu.removeAllItems()
+                // System Default option
+                let defaultItem = NSMenuItem(title: "System Default", action: #selector(selectMic(_:)), keyEquivalent: "")
+                defaultItem.target = self
+                defaultItem.representedObject = "" as NSString
+                defaultItem.state = Settings.shared.micDeviceUID.isEmpty ? .on : .off
+                submenu.addItem(defaultItem)
+                submenu.addItem(NSMenuItem.separator())
+                // Available input devices
+                let devices = listInputDevices()
+                for device in devices {
+                    let devItem = NSMenuItem(title: device.name, action: #selector(selectMic(_:)), keyEquivalent: "")
+                    devItem.target = self
+                    devItem.representedObject = device.uid as NSString
+                    devItem.state = (device.uid == Settings.shared.micDeviceUID) ? .on : .off
+                    submenu.addItem(devItem)
+                }
+            }
+        }
+    }
+
+    @objc func selectMic(_ sender: NSMenuItem) {
+        guard let uid = sender.representedObject as? String else { return }
+        Settings.shared.micDeviceUID = uid
     }
 
     @objc func pasteLast() {
