@@ -7,7 +7,7 @@
 
 ### Audio
 
-- [ ] **AUD-01**: App records audio using AVAudioEngine instead of external sox/rec
+- [x] **AUD-01**: App records audio using AVAudioEngine instead of external sox/rec
 - [ ] **AUD-02**: User can select microphone input device from Settings
 - [ ] **AUD-03**: App handles Bluetooth/AirPods mic gracefully (detect zero-buffer, show warning)
 - [ ] **AUD-04**: App detects active app and adjusts AI cleanup prompt per-app context
@@ -63,7 +63,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| AUD-01 | Phase 1 | Pending |
+| AUD-01 | Phase 1 | Complete |
 | AUD-02 | Phase 1 | Pending |
 | AUD-03 | Phase 1 | Pending |
 | AUD-04 | Phase 1 | Pending |
