@@ -2628,8 +2628,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.inputMonitor.stop()
-            _ = self?.inputMonitor.start()
+            self?.markWake()
+            // Delay tap restart — system needs a moment after wake
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                self?.inputMonitor.stop()
+                _ = self?.inputMonitor.start()
+            }
         }
 
         // Preflight checks
@@ -2651,20 +2655,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     private var wasAccessibilityGranted = false
     private var accessibilityPollTimer: Timer?
+    private var lastWakeTime: Date = .distantPast
 
     func startAccessibilityPolling() {
         wasAccessibilityGranted = AXIsProcessTrusted()
         accessibilityPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            // Skip checks for 5 seconds after wake — AXIsProcessTrusted can flicker
+            if Date().timeIntervalSince(self.lastWakeTime) < 5.0 { return }
             let isNowGranted = AXIsProcessTrusted()
-            guard let self = self, isNowGranted != self.wasAccessibilityGranted else { return }
+            guard isNowGranted != self.wasAccessibilityGranted else { return }
             self.wasAccessibilityGranted = isNowGranted
             if isNowGranted {
                 // Permission was just granted — relaunch to re-create event tap
                 self.relaunchSilently()
             }
-            // If permission was revoked, the event tap will simply stop working;
-            // the onboarding handles the initial grant, this covers post-onboarding toggling
         }
+    }
+
+    func markWake() {
+        lastWakeTime = Date()
     }
 
     func relaunchSilently() {
