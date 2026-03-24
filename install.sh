@@ -60,7 +60,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 echo "Compiling Voice..."
 
 swiftc -O -o "${SCRIPT_DIR}/Voice" "${SCRIPT_DIR}/Voice.swift" \
-    -framework Cocoa -framework ApplicationServices -framework UserNotifications -framework AVFoundation
+    -framework Cocoa -framework ApplicationServices -framework UserNotifications -framework AVFoundation -framework CoreAudio
 
 # --- Create app bundle ---
 APP_DIR="${SCRIPT_DIR}/Voice.app/Contents"
