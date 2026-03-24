@@ -115,11 +115,34 @@ else
 fi
 
 # Sign with stable identity so macOS TCC keeps accessibility permission across recompiles.
-# Falls back to ad-hoc if "Voice Dev" certificate isn't in keychain.
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "Voice Dev"; then
-    codesign --force --deep --sign "Voice Dev" --entitlements "${SCRIPT_DIR}/Voice.entitlements" "${SCRIPT_DIR}/Voice.app"
-    echo "App bundle created and signed (Voice Dev) at ${SCRIPT_DIR}/Voice.app"
+# Priority: Developer ID Application > Voice Dev > ad-hoc
+# Uses inside-out signing order: dylibs -> whisper-cli -> app bundle (no --deep)
+SIGN_CERT=""
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application: Faraday Soft"; then
+    SIGN_CERT="Developer ID Application: Faraday Soft (MWW7M2563A)"
+elif security find-identity -v -p codesigning 2>/dev/null | grep -q "Voice Dev"; then
+    SIGN_CERT="Voice Dev"
+fi
+
+if [[ -n "$SIGN_CERT" ]]; then
+    # Inside-out signing: dylibs first, then whisper-cli, then app bundle
+    for dylib in "${APP_DIR}/Frameworks/"*.dylib; do
+        codesign --force --sign "${SIGN_CERT}" --timestamp --options runtime "${dylib}"
+    done
+    if [[ -f "${SCRIPT_DIR}/WhisperMinimal.entitlements" ]]; then
+        codesign --force --sign "${SIGN_CERT}" --timestamp --options runtime \
+            --entitlements "${SCRIPT_DIR}/WhisperMinimal.entitlements" \
+            "${APP_DIR}/Resources/whisper-cli"
+    else
+        codesign --force --sign "${SIGN_CERT}" --timestamp --options runtime \
+            "${APP_DIR}/Resources/whisper-cli"
+    fi
+    codesign --force --sign "${SIGN_CERT}" --timestamp --options runtime \
+        --entitlements "${SCRIPT_DIR}/Voice.entitlements" \
+        "${SCRIPT_DIR}/Voice.app"
+    echo "App bundle created and signed (${SIGN_CERT}) at ${SCRIPT_DIR}/Voice.app"
 else
+    # Ad-hoc fallback: --deep is acceptable for local dev builds
     codesign --force --deep --sign - --entitlements "${SCRIPT_DIR}/Voice.entitlements" "${SCRIPT_DIR}/Voice.app"
     echo "App bundle created (ad-hoc signed) at ${SCRIPT_DIR}/Voice.app"
     echo "Note: You may need to re-grant Accessibility permission after recompiling."
