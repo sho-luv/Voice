@@ -12,7 +12,7 @@ Voice v3.2 ships three phases: native audio pipeline to eliminate Homebrew depen
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Audio + Visual** - Replace sox with AVFoundation, add mic selector, waveform overlay, and active-app context
+- [x] **Phase 1: Audio + Visual** - Replace sox with AVFoundation, add mic selector, waveform overlay, and active-app context (completed 2026-03-24)
 - [ ] **Phase 2: Distribution** - Developer ID signing, notarization, first-launch onboarding, and LemonSqueezy license gate
 - [ ] **Phase 3: History + Editing** - Transcription history window, custom dictionary, voice commands, and file transcription
 
@@ -28,12 +28,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. AirPods connected as input show a visible warning rather than silently producing empty transcriptions
   4. Recording overlay shows animated waveform bars that respond to voice amplitude in real time
   5. Recording overlay shows the name of the app that will receive the transcribed text
-**Plans:** 1/3 plans executed
+**Plans:** 3/3 plans complete
 
 Plans:
 - [x] 01-01-PLAN.md — Replace sox/rec with AVAudioEngine recording and WAV writer
-- [ ] 01-02-PLAN.md — Mic selector in Settings Audio tab + AirPods zero-signal detection
-- [ ] 01-03-PLAN.md — Waveform overlay, timer, app context display, and human verification
+- [x] 01-02-PLAN.md — Mic selector in Settings Audio tab + AirPods zero-signal detection
+- [x] 01-03-PLAN.md — Waveform overlay, timer, app context display, and human verification
 
 ### Phase 2: Distribution
 **Goal**: A signed, notarized DMG ships to paying customers with guided onboarding and license enforcement
@@ -64,6 +64,6 @@ Phases execute in numeric order: 1 -> 2 -> 3
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Audio + Visual | 1/3 | In Progress|  |
+| 1. Audio + Visual | 3/3 | Complete   | 2026-03-24 |
 | 2. Distribution | 0/TBD | Not started | - |
 | 3. History + Editing | 0/TBD | Not started | - |

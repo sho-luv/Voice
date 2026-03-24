@@ -8,14 +8,14 @@
 ### Audio
 
 - [x] **AUD-01**: App records audio using AVAudioEngine instead of external sox/rec
-- [ ] **AUD-02**: User can select microphone input device from Settings
-- [ ] **AUD-03**: App handles Bluetooth/AirPods mic gracefully (detect zero-buffer, show warning)
-- [ ] **AUD-04**: App detects active app and adjusts AI cleanup prompt per-app context
+- [x] **AUD-02**: User can select microphone input device from Settings
+- [x] **AUD-03**: App handles Bluetooth/AirPods mic gracefully (detect zero-buffer, show warning)
+- [x] **AUD-04**: App detects active app and adjusts AI cleanup prompt per-app context
 
 ### Visual
 
-- [ ] **VIS-01**: Recording overlay shows animated waveform bars responding to voice levels
-- [ ] **VIS-02**: Recording overlay shows which app will receive the transcribed text
+- [x] **VIS-01**: Recording overlay shows animated waveform bars responding to voice levels
+- [x] **VIS-02**: Recording overlay shows which app will receive the transcribed text
 
 ### Distribution
 
@@ -64,11 +64,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | AUD-01 | Phase 1 | Complete |
-| AUD-02 | Phase 1 | Pending |
-| AUD-03 | Phase 1 | Pending |
-| AUD-04 | Phase 1 | Pending |
-| VIS-01 | Phase 1 | Pending |
-| VIS-02 | Phase 1 | Pending |
+| AUD-02 | Phase 1 | Complete |
+| AUD-03 | Phase 1 | Complete |
+| AUD-04 | Phase 1 | Complete |
+| VIS-01 | Phase 1 | Complete |
+| VIS-02 | Phase 1 | Complete |
 | DIST-01 | Phase 2 | Pending |
 | DIST-02 | Phase 2 | Pending |
 | DIST-03 | Phase 2 | Pending |
