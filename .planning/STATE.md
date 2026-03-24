@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v3.2
 milestone_name: milestone
 status: Ready to execute
-stopped_at: Completed 02-distribution-01-PLAN.md
-last_updated: "2026-03-24T14:56:36.358Z"
+stopped_at: "Checkpoint: 02-distribution-02-PLAN.md Task 2 awaiting human verification"
+last_updated: "2026-03-24T15:01:14.948Z"
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 6
-  completed_plans: 4
+  completed_plans: 5
 ---
 
 # Project State
@@ -24,7 +24,7 @@ See: .planning/PROJECT.md (updated 2026-03-24)
 ## Current Position
 
 Phase: 02 (distribution) — EXECUTING
-Plan: 2 of 3
+Plan: 3 of 3
 
 ## Performance Metrics
 
@@ -49,6 +49,7 @@ Plan: 2 of 3
 | Phase 01-audio-visual P01 | 18 | 2 tasks | 1 files |
 | Phase 01-audio-visual P02 | 3 | 2 tasks | 2 files |
 | Phase 02-distribution P01 | 12 | 2 tasks | 6 files |
+| Phase 02-distribution P02 | 8 | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -66,6 +67,8 @@ Recent decisions affecting current work:
 - [Phase 01-audio-visual]: Zero-signal detection: rms < 0.0001 after 8 buffers (~2s) triggers overlay warning, auto-dismisses after 3s
 - [Phase 02-distribution]: Inside-out signing order (dylibs -> whisper-cli -> app) required for hardened runtime — --deep disabled in Developer ID path
 - [Phase 02-distribution]: updateLaunchAgent changed from private to internal so AppDelegate migration code can call Settings.shared.updateLaunchAgent during first-launch upgrade
+- [Phase 02-distribution]: OnboardingWindowController uses show/hide NSView pattern (not NSViewController stack) — simpler, follows D-01 decision
+- [Phase 02-distribution]: AX polling timer dual-use: onboarding auto-advance + post-onboarding silent relaunch via NSWorkspace.openApplication
 
 ### Pending Todos
 
@@ -80,6 +83,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-24T14:56:36.356Z
-Stopped at: Completed 02-distribution-01-PLAN.md
+Last session: 2026-03-24T15:01:14.945Z
+Stopped at: Checkpoint: 02-distribution-02-PLAN.md Task 2 awaiting human verification
 Resume file: None
