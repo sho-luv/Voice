@@ -3141,19 +3141,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     private var wasAccessibilityGranted = false
     private var accessibilityPollTimer: Timer?
     private var lastWakeTime: Date = .distantPast
+    private var axChangeCount = 0
 
     func startAccessibilityPolling() {
         wasAccessibilityGranted = AXIsProcessTrusted()
         accessibilityPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            // Skip checks for 5 seconds after wake — AXIsProcessTrusted can flicker
-            if Date().timeIntervalSince(self.lastWakeTime) < 5.0 { return }
+            // Skip checks for 10 seconds after wake — AXIsProcessTrusted can flicker
+            if Date().timeIntervalSince(self.lastWakeTime) < 10.0 { return }
             let isNowGranted = AXIsProcessTrusted()
-            guard isNowGranted != self.wasAccessibilityGranted else { return }
-            self.wasAccessibilityGranted = isNowGranted
-            if isNowGranted {
-                // Permission was just granted — relaunch to re-create event tap
-                self.relaunchSilently()
+            if isNowGranted != self.wasAccessibilityGranted {
+                // Debounce: require 3 consecutive checks (~6s) before acting
+                self.axChangeCount += 1
+                if self.axChangeCount >= 3 {
+                    self.wasAccessibilityGranted = isNowGranted
+                    self.axChangeCount = 0
+                    if isNowGranted {
+                        self.relaunchSilently()
+                    }
+                }
+            } else {
+                self.axChangeCount = 0
             }
         }
     }
@@ -3411,7 +3419,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
+        // Delay dealloc — AVAudioIOUnit dispatch queue may have in-flight callbacks
+        let engineRef = audioEngine
         audioEngine = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { _ = engineRef }
         // Finalize WAV header with actual data size
         if let handle = audioFileHandle {
             writeWAVHeader(to: handle, dataSize: audioDataSize)
@@ -3441,7 +3452,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
+        let engineRef = audioEngine
         audioEngine = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { _ = engineRef }
         audioFileHandle?.closeFile()
         audioFileHandle = nil
 
@@ -3623,7 +3636,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
+        let popoEngineRef = audioEngine
         audioEngine = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { _ = popoEngineRef }
         // Finalize WAV header with actual data size
         if let handle = audioFileHandle {
             writeWAVHeader(to: handle, dataSize: audioDataSize)
@@ -3649,7 +3664,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
+        let cancelPopoEngineRef = audioEngine
         audioEngine = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { _ = cancelPopoEngineRef }
         audioFileHandle?.closeFile()
         audioFileHandle = nil
 
