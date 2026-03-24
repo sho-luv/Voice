@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v3.2
 milestone_name: milestone
-status: Ready to execute
-stopped_at: "Checkpoint: 02-distribution-02-PLAN.md Task 2 awaiting human verification"
-last_updated: "2026-03-24T15:01:14.948Z"
+status: Phase complete — ready for verification
+stopped_at: "Checkpoint: 02-distribution-03-PLAN.md Task 2 awaiting human verification"
+last_updated: "2026-03-24T16:16:20.981Z"
 progress:
   total_phases: 3
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 6
-  completed_plans: 5
+  completed_plans: 6
 ---
 
 # Project State
@@ -50,6 +50,7 @@ Plan: 3 of 3
 | Phase 01-audio-visual P02 | 3 | 2 tasks | 2 files |
 | Phase 02-distribution P01 | 12 | 2 tasks | 6 files |
 | Phase 02-distribution P02 | 8 | 1 tasks | 1 files |
+| Phase 02-distribution P03 | 8 | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -69,6 +70,9 @@ Recent decisions affecting current work:
 - [Phase 02-distribution]: updateLaunchAgent changed from private to internal so AppDelegate migration code can call Settings.shared.updateLaunchAgent during first-launch upgrade
 - [Phase 02-distribution]: OnboardingWindowController uses show/hide NSView pattern (not NSViewController stack) — simpler, follows D-01 decision
 - [Phase 02-distribution]: AX polling timer dual-use: onboarding auto-advance + post-onboarding silent relaunch via NSWorkspace.openApplication
+- [Phase 02-distribution]: checkoutURL made internal on LicenseManager so inner BuyHandler class can access it without static accessor
+- [Phase 02-distribution]: lsStoreId/lsProductId set to 0 as TODO placeholders — store_id validation skipped when 0, activation works structurally before dashboard values are set
+- [Phase 02-distribution]: Menu bar trial status shown only for non-licensed users; licensed users see clean menu without status line
 
 ### Pending Todos
 
@@ -83,6 +87,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-24T15:01:14.945Z
-Stopped at: Checkpoint: 02-distribution-02-PLAN.md Task 2 awaiting human verification
+Last session: 2026-03-24T16:16:20.978Z
+Stopped at: Checkpoint: 02-distribution-03-PLAN.md Task 2 awaiting human verification
 Resume file: None
