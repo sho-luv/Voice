@@ -600,7 +600,9 @@ class OverlayContentView: NSView {
         var x: CGFloat = 12
 
         // Red dot (recording) or blue dot (POPO)
-        let dotColor: NSColor = (overlayState == .recording)
+        let isRecordingState: Bool
+        if case .recording = overlayState { isRecordingState = true } else { isRecordingState = false }
+        let dotColor: NSColor = isRecordingState
             ? NSColor(red: 1.0, green: 0.2, blue: 0.2, alpha: 1.0)
             : NSColor(red: 0.2, green: 0.8, blue: 1.0, alpha: 1.0)
         let dotSize: CGFloat = 8
