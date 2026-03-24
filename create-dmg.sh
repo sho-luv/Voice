@@ -1,9 +1,27 @@
 #!/usr/bin/env bash
+# create-dmg.sh — Build, sign, notarize, and package Voice.app as a DMG.
+#
+# Usage:
+#   ./create-dmg.sh
+#
+# Requirements:
+#   - whisper-cli installed (brew install whisper-cpp)
+#   - Developer ID Application certificate in Keychain (for production signing)
+#   - xcrun notarytool keychain profile "voice-notarize" (for notarization — one-time setup)
+#   - create-dmg installed (brew install create-dmg) — optional, falls back to hdiutil
+#
+# One-time notarization credential setup:
+#   xcrun notarytool store-credentials voice-notarize \
+#     --apple-id YOUR_APPLE_ID \
+#     --team-id MWW7M2563A \
+#     --password APP_SPECIFIC_PASSWORD
+
 set -euo pipefail
 
-VERSION="3.1"
+VERSION="3.2"
 APP_NAME="Voice"
 DMG_NAME="${APP_NAME}-${VERSION}.dmg"
+CERT="Developer ID Application: Faraday Soft (MWW7M2563A)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "=== Building ${APP_NAME} ${VERSION} DMG ==="
@@ -15,11 +33,27 @@ if [[ -z "$WHISPER_CLI" ]]; then
     exit 1
 fi
 
+# --- Determine signing identity ---
+USE_DEVELOPER_ID=false
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "${CERT}"; then
+    USE_DEVELOPER_ID=true
+    echo "Using Developer ID certificate: ${CERT}"
+elif security find-identity -v -p codesigning 2>/dev/null | grep -q "Voice Dev"; then
+    CERT="Voice Dev"
+    echo "Developer ID not found. Falling back to Voice Dev certificate."
+else
+    CERT="-"
+    echo "Warning: No Developer ID or Voice Dev certificate found. Using ad-hoc signing." >&2
+    echo "  Users will need to right-click > Open on first launch." >&2
+    USE_DEVELOPER_ID=false
+fi
+
 # --- Compile ---
 echo "Compiling..."
 swiftc -O -o "${SCRIPT_DIR}/Voice" "${SCRIPT_DIR}/Voice.swift" \
     -framework Cocoa -framework ApplicationServices \
-    -framework UserNotifications -framework AVFoundation
+    -framework UserNotifications -framework AVFoundation \
+    -framework CoreAudio
 
 # --- Create app bundle ---
 echo "Creating app bundle..."
@@ -66,14 +100,32 @@ for fw in "${APP_DIR}/Frameworks/"*.dylib; do
     done
 done
 
-# --- Sign ---
+# --- Sign inside-out (dylibs -> whisper-cli -> app bundle) ---
 echo "Signing..."
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "Voice Dev"; then
-    codesign --force --deep --sign "Voice Dev" "${SCRIPT_DIR}/Voice.app"
-    echo "  Signed with Voice Dev certificate"
+if [[ "$CERT" == "-" ]]; then
+    # Ad-hoc fallback: sign with --deep (acceptable for dev builds only)
+    echo "  Ad-hoc signing with --deep (not suitable for distribution)"
+    codesign --force --deep --sign - --entitlements "${SCRIPT_DIR}/Voice.entitlements" "${SCRIPT_DIR}/Voice.app"
 else
-    codesign --force --deep --sign - "${SCRIPT_DIR}/Voice.app"
-    echo "  Ad-hoc signed (users will need to right-click > Open on first launch)"
+    # Production signing: inside-out order, hardened runtime, no --deep
+    echo "  Signing dylibs..."
+    for dylib in "${APP_DIR}/Frameworks/"*.dylib; do
+        codesign --force --sign "${CERT}" --timestamp --options runtime "${dylib}"
+    done
+
+    echo "  Signing whisper-cli..."
+    codesign --force --sign "${CERT}" --timestamp --options runtime \
+        --entitlements "${SCRIPT_DIR}/WhisperMinimal.entitlements" \
+        "${APP_DIR}/Resources/whisper-cli"
+
+    echo "  Signing app bundle..."
+    codesign --force --sign "${CERT}" --timestamp --options runtime \
+        --entitlements "${SCRIPT_DIR}/Voice.entitlements" \
+        "${SCRIPT_DIR}/Voice.app"
+
+    echo "  Verifying signature..."
+    codesign --verify --deep --strict --verbose=2 "${SCRIPT_DIR}/Voice.app"
+    echo "  Signed with: ${CERT}"
 fi
 
 # --- Create DMG ---
@@ -84,16 +136,64 @@ mkdir -p "$STAGING"
 cp -R "${SCRIPT_DIR}/Voice.app" "$STAGING/"
 ln -s /Applications "$STAGING/Applications"
 
-hdiutil create -volname "$APP_NAME" \
-    -srcfolder "$STAGING" \
-    -ov -format UDZO \
-    "${SCRIPT_DIR}/${DMG_NAME}"
+if command -v create-dmg &>/dev/null; then
+    # Use create-dmg for a polished installer DMG with drag-to-Applications layout
+    DMG_BG_ARGS=()
+    if [[ -f "${SCRIPT_DIR}/dmg-background.png" ]]; then
+        DMG_BG_ARGS=(--background "${SCRIPT_DIR}/dmg-background.png")
+    else
+        echo "Warning: dmg-background.png not found — DMG will use default background. Run the background generator or add an image." >&2
+    fi
+    create-dmg \
+        --volname "Voice" \
+        "${DMG_BG_ARGS[@]}" \
+        --window-size 660 400 \
+        --icon-size 100 \
+        --icon "Voice.app" 180 195 \
+        --app-drop-link 480 195 \
+        "${SCRIPT_DIR}/${DMG_NAME}" \
+        "${STAGING}/"
+else
+    echo "Warning: create-dmg not installed. Using hdiutil (no custom background). Install with: brew install create-dmg" >&2
+    hdiutil create -volname "$APP_NAME" \
+        -srcfolder "$STAGING" \
+        -ov -format UDZO \
+        "${SCRIPT_DIR}/${DMG_NAME}"
+fi
 
 rm -rf "$STAGING"
+
+# --- Sign the DMG ---
+if [[ "$CERT" != "-" ]]; then
+    echo "Signing DMG..."
+    codesign --force --sign "${CERT}" --timestamp "${SCRIPT_DIR}/${DMG_NAME}"
+fi
+
+# --- Notarization ---
+if [[ "$USE_DEVELOPER_ID" == "true" ]]; then
+    if xcrun notarytool history --keychain-profile "voice-notarize" &>/dev/null 2>&1; then
+        echo "Notarizing DMG (this may take a few minutes)..."
+        xcrun notarytool submit "${SCRIPT_DIR}/${DMG_NAME}" --keychain-profile "voice-notarize" --wait
+        echo "Stapling notarization ticket..."
+        xcrun stapler staple "${SCRIPT_DIR}/${DMG_NAME}"
+        echo "Notarization complete."
+    else
+        echo ""
+        echo "Notarization credentials not configured. To set up (one-time):"
+        echo "  xcrun notarytool store-credentials voice-notarize \\"
+        echo "    --apple-id YOUR_APPLE_ID \\"
+        echo "    --team-id MWW7M2563A \\"
+        echo "    --password APP_SPECIFIC_PASSWORD"
+        echo ""
+        echo "Then re-run this script to notarize and staple."
+    fi
+
+    # Final Gatekeeper verification
+    echo "Verifying with Gatekeeper..."
+    spctl --assess --type execute -vvvv "${SCRIPT_DIR}/Voice.app" || true
+fi
 
 echo ""
 echo "=== Created ${DMG_NAME} ==="
 echo "  Size: $(du -h "${SCRIPT_DIR}/${DMG_NAME}" | cut -f1)"
 echo ""
-echo "To notarize (requires Apple Developer ID):"
-echo "  xcrun notarytool submit ${DMG_NAME} --apple-id YOUR_ID --team-id YOUR_TEAM --password YOUR_APP_PASSWORD"

@@ -191,18 +191,18 @@ class Settings {
         set { defaults.set(newValue, forKey: "overlayShowTimer") }
     }
 
-    private func updateLaunchAgent(enabled: Bool) {
-        let plistPath = NSHomeDirectory() + "/Library/LaunchAgents/com.local.voice.plist"
+    func updateLaunchAgent(enabled: Bool) {
+        let plistPath = NSHomeDirectory() + "/Library/LaunchAgents/com.faradaysoft.voice.plist"
         if enabled {
             // Find the current executable
-            let execPath = Bundle.main.executablePath ?? "\(NSHomeDirectory())/home/projects/voice/Voice.app/Contents/MacOS/Voice"
+            let execPath = Bundle.main.executablePath ?? "/Applications/Voice.app/Contents/MacOS/Voice"
             let plist = """
             <?xml version="1.0" encoding="UTF-8"?>
             <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
             <plist version="1.0">
             <dict>
                 <key>Label</key>
-                <string>com.local.voice</string>
+                <string>com.faradaysoft.voice</string>
                 <key>Program</key>
                 <string>\(execPath)</string>
                 <key>RunAtLoad</key>
@@ -2045,9 +2045,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             window.close()
         }
 
+        // Migrate old LaunchAgent bundle ID (com.local.voice -> com.faradaysoft.voice)
+        let oldPlistPath = NSHomeDirectory() + "/Library/LaunchAgents/com.local.voice.plist"
+        let newPlistPath = NSHomeDirectory() + "/Library/LaunchAgents/com.faradaysoft.voice.plist"
+        if FileManager.default.fileExists(atPath: oldPlistPath) && !FileManager.default.fileExists(atPath: newPlistPath) {
+            NSLog("Voice: migrating LaunchAgent from com.local.voice to com.faradaysoft.voice")
+            let unload = Process()
+            unload.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            unload.arguments = ["unload", oldPlistPath]
+            try? unload.run()
+            unload.waitUntilExit()
+            try? FileManager.default.removeItem(atPath: oldPlistPath)
+            // Re-create with new bundle ID if autostart is enabled
+            if Settings.shared.autoStartOnLogin {
+                Settings.shared.updateLaunchAgent(enabled: true)
+            }
+        }
+
         // Prevent duplicate instances — if another Voice is already running, quit silently
         let myPid = ProcessInfo.processInfo.processIdentifier
-        let bundleID = Bundle.main.bundleIdentifier ?? "com.local.voice"
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.faradaysoft.voice"
         let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
             .filter { $0.processIdentifier != myPid && !$0.isTerminated }
         if !others.isEmpty {
@@ -2868,7 +2885,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 // before applicationDidFinishLaunching, so this must be set early.
 UserDefaults.standard.set(false, forKey: "NSQuitAlwaysKeepsWindows")
 // Nuke any saved state left over from a previous run
-let savedStatePath = NSHomeDirectory() + "/Library/Saved Application State/com.local.voice.savedState"
+let savedStatePath = NSHomeDirectory() + "/Library/Saved Application State/com.faradaysoft.voice.savedState"
 try? FileManager.default.removeItem(atPath: savedStatePath)
 
 let app = NSApplication.shared
