@@ -220,6 +220,58 @@ class Settings {
         set { defaults.set(newValue, forKey: "overlaySensitivity") }
     }
 
+    var saveTranscripts: Bool {
+        get { defaults.object(forKey: "saveTranscripts") == nil ? true : defaults.bool(forKey: "saveTranscripts") }
+        set { defaults.set(newValue, forKey: "saveTranscripts") }
+    }
+
+    var transcriptDirectory: String {
+        get {
+            let val = defaults.string(forKey: "transcriptDirectory") ?? ""
+            if val.isEmpty {
+                let defaultDir = NSHomeDirectory() + "/Documents/Voice Transcripts"
+                return defaultDir
+            }
+            return val
+        }
+        set { defaults.set(newValue, forKey: "transcriptDirectory") }
+    }
+
+    func saveTranscript(_ text: String) {
+        guard saveTranscripts else { return }
+        let dir = transcriptDirectory
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: dir) {
+            try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        let filename = "voice_\(formatter.string(from: Date())).txt"
+        let path = (dir as NSString).appendingPathComponent(filename)
+        try? text.write(toFile: path, atomically: true, encoding: .utf8)
+        NSLog("Voice: saved transcript to %@", path)
+    }
+
+    func searchTranscripts(query: String) -> [(date: Date, text: String, path: String)] {
+        let dir = transcriptDirectory
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: dir) else { return [] }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+
+        var results: [(date: Date, text: String, path: String)] = []
+        for file in files.sorted().reversed() where file.hasSuffix(".txt") {
+            let path = (dir as NSString).appendingPathComponent(file)
+            guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+            if query.isEmpty || content.localizedCaseInsensitiveContains(query) {
+                let datePart = file.replacingOccurrences(of: "voice_", with: "").replacingOccurrences(of: ".txt", with: "")
+                let date = formatter.date(from: datePart) ?? Date()
+                results.append((date: date, text: content, path: path))
+            }
+        }
+        return results
+    }
+
     var onboardingComplete: Bool {
         get { defaults.bool(forKey: "onboardingComplete") }
         set { defaults.set(newValue, forKey: "onboardingComplete") }
@@ -449,6 +501,13 @@ class InputMonitor {
     private var spaceHeld = false
     private let minHoldDuration: TimeInterval = 0.3  // ignore taps < 300ms
 
+    // Double-tap detection for POPO mode
+    private var lastShortTapTime: TimeInterval = 0       // when the last short tap (release) happened
+    private var pendingRecordStart = false                // waiting to see if second tap comes
+    private var doubleTapTimer: DispatchWorkItem?         // fires if no second tap arrives
+    private let doubleTapWindow: TimeInterval = 0.4       // max gap between taps
+    private let shortTapThreshold: TimeInterval = 0.25    // taps shorter than this are "short"
+
     // Cached hotkey values — read from Settings once, updated via reloadHotkey()
     // Avoids hitting UserDefaults inside the CGEventTap callback
     var hotkeyCode: Int64 = 63
@@ -524,13 +583,8 @@ class InputMonitor {
         let hotkeyCode = monitor.hotkeyCode
         let hotkeyFlag = monitor.hotkeyFlag
 
-        // Track Space key state (for POPO activation)
-        if type == .keyDown && keyCode == 49 {
-            monitor.spaceHeld = true
-            return Unmanaged.passRetained(event)
-        }
-        if type == .keyUp && keyCode == 49 {
-            monitor.spaceHeld = false
+        // Space key — no longer used for POPO activation (double-tap replaces Space+fn)
+        if keyCode == 49 && (type == .keyDown || type == .keyUp) {
             return Unmanaged.passRetained(event)
         }
 
@@ -549,51 +603,81 @@ class InputMonitor {
         }
 
         let keyPressed = flags.contains(hotkeyFlag)
+        let now = ProcessInfo.processInfo.systemUptime
 
         if keyPressed && !monitor.fnDown {
-            // Key DOWN
+            // ── Key DOWN ──
             monitor.fnDown = true
-            monitor.fnDownTime = ProcessInfo.processInfo.systemUptime
+            monitor.fnDownTime = now
 
             // In POPO mode, tap stops it
             if monitor.isPopo {
                 DispatchQueue.main.async { monitor.onPopoStop?() }
-                return nil  // swallow
-            }
-
-            // Space+key -> POPO mode
-            if monitor.spaceHeld && !monitor.isRecording {
-                DispatchQueue.main.async { monitor.onPopoStart?() }
-                return nil  // swallow
-            }
-
-            // Start recording (push-to-talk)
-            if !monitor.isRecording {
-                DispatchQueue.main.async { monitor.onRecordStart?() }
-            }
-            return nil  // swallow to prevent emoji picker / other default behavior
-
-        } else if !keyPressed && monitor.fnDown {
-            // Key UP
-            monitor.fnDown = false
-            let holdDuration = ProcessInfo.processInfo.systemUptime - monitor.fnDownTime
-
-            // In POPO mode, don't stop on release
-            if monitor.isPopo {
-                return nil  // swallow
-            }
-
-            // If held too briefly, cancel rather than transcribe garbage
-            if monitor.isRecording && holdDuration < monitor.minHoldDuration {
-                DispatchQueue.main.async { monitor.onCancel?() }
                 return nil
             }
 
-            // Stop recording (push-to-talk release)
-            if monitor.isRecording {
-                DispatchQueue.main.async { monitor.onRecordStop?() }
+            // Check for double-tap: if we had a recent short tap and this press
+            // comes within the window, it's a double-tap → POPO
+            if monitor.pendingRecordStart && (now - monitor.lastShortTapTime) < monitor.doubleTapWindow {
+                monitor.pendingRecordStart = false
+                monitor.doubleTapTimer?.cancel()
+                monitor.doubleTapTimer = nil
+                // Cancel any recording that may have started from the deferred timer
+                if monitor.isRecording {
+                    DispatchQueue.main.async { monitor.onCancel?() }
+                }
+                NSLog("Voice: double-tap detected → POPO mode")
+                DispatchQueue.main.async { monitor.onPopoStart?() }
+                return nil
+            }
+
+            // Start push-to-talk recording (immediate — no delay)
+            if !monitor.isRecording {
+                DispatchQueue.main.async { monitor.onRecordStart?() }
             }
             return nil  // swallow
+
+        } else if !keyPressed && monitor.fnDown {
+            // ── Key UP ──
+            monitor.fnDown = false
+            let holdDuration = now - monitor.fnDownTime
+
+            // In POPO mode, ignore release
+            if monitor.isPopo {
+                return nil
+            }
+
+            // Short tap — potential first tap of double-tap
+            if holdDuration < monitor.shortTapThreshold {
+                // Cancel the recording that started on key down
+                if monitor.isRecording {
+                    DispatchQueue.main.async { monitor.onCancel?() }
+                }
+                // Mark as pending double-tap
+                monitor.lastShortTapTime = now
+                monitor.pendingRecordStart = true
+
+                // If no second tap arrives within the window, it was just a quick tap — ignore
+                let timer = DispatchWorkItem { [weak monitor] in
+                    guard let monitor = monitor else { return }
+                    monitor.pendingRecordStart = false
+                    monitor.doubleTapTimer = nil
+                }
+                monitor.doubleTapTimer?.cancel()
+                monitor.doubleTapTimer = timer
+                DispatchQueue.main.asyncAfter(deadline: .now() + monitor.doubleTapWindow, execute: timer)
+                return nil
+            }
+
+            // Long hold release — normal push-to-talk stop
+            if monitor.isRecording {
+                if holdDuration < monitor.minHoldDuration {
+                    DispatchQueue.main.async { monitor.onCancel?() }
+                } else {
+                    DispatchQueue.main.async { monitor.onRecordStop?() }
+                }
+            }
+            return nil
         }
 
         return Unmanaged.passRetained(event)
@@ -2309,6 +2393,11 @@ class SettingsViewController: NSViewController {
     private var whisperPopup: NSPopUpButton!
     private var downloadButton: NSButton!
     private var downloadStatusLabel: NSTextField!
+    private var saveTranscriptsCheckbox: NSButton!
+    private var transcriptDirLabel: NSTextField!
+    private var searchField: NSTextField!
+    private var searchResultsView: NSScrollView!
+    private var searchResultsText: NSTextView!
 
     // License tab controls
     private var licenseStatusLabel = NSTextField(labelWithString: "")
@@ -2664,13 +2753,13 @@ class SettingsViewController: NSViewController {
     private func makeTranscriptionTab() -> NSTabViewItem {
         let item = NSTabViewItem(identifier: "transcription")
         item.label = "Transcription"
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 450, height: 300))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 450, height: 350))
 
-        var y: CGFloat = 260
+        var y: CGFloat = 280
 
         // Whisper model
         addLabel("Whisper model:", at: NSPoint(x: 20, y: y), in: container)
-        whisperPopup = NSPopUpButton(frame: NSRect(x: 180, y: y - 2, width: 200, height: 26), pullsDown: false)
+        whisperPopup = NSPopUpButton(frame: NSRect(x: 140, y: y - 2, width: 200, height: 26), pullsDown: false)
         let models = ["large-v3-turbo-q5_0", "small.en", "medium.en", "large-v3"]
         for m in models {
             whisperPopup.addItem(withTitle: m)
@@ -2680,25 +2769,141 @@ class SettingsViewController: NSViewController {
         whisperPopup.action = #selector(whisperModelChanged)
         container.addSubview(whisperPopup)
 
-        y -= 44
-
-        // Download button
-        downloadButton = NSButton(title: "Download Model", target: self, action: #selector(downloadModel))
-        downloadButton.frame = NSRect(x: 20, y: y, width: 140, height: 28)
+        downloadButton = NSButton(title: "Download", target: self, action: #selector(downloadModel))
+        downloadButton.frame = NSRect(x: 345, y: y - 2, width: 85, height: 26)
         downloadButton.bezelStyle = .rounded
         container.addSubview(downloadButton)
 
+        y -= 22
         downloadStatusLabel = NSTextField(labelWithString: "")
-        downloadStatusLabel.frame = NSRect(x: 170, y: y + 4, width: 260, height: 22)
+        downloadStatusLabel.frame = NSRect(x: 140, y: y, width: 290, height: 16)
         downloadStatusLabel.textColor = .secondaryLabelColor
-        downloadStatusLabel.font = NSFont.systemFont(ofSize: 11)
+        downloadStatusLabel.font = NSFont.systemFont(ofSize: 10)
         downloadStatusLabel.lineBreakMode = .byTruncatingTail
         container.addSubview(downloadStatusLabel)
 
         updateDownloadButton()
 
+        y -= 28
+
+        // Save transcripts
+        saveTranscriptsCheckbox = NSButton(checkboxWithTitle: "Save transcripts to:", target: self, action: #selector(saveTranscriptsChanged))
+        saveTranscriptsCheckbox.frame = NSRect(x: 20, y: y, width: 160, height: 22)
+        saveTranscriptsCheckbox.state = Settings.shared.saveTranscripts ? .on : .off
+        container.addSubview(saveTranscriptsCheckbox)
+
+        let dirButton = NSButton(title: "Choose...", target: self, action: #selector(chooseTranscriptDir))
+        dirButton.frame = NSRect(x: 345, y: y, width: 85, height: 22)
+        dirButton.bezelStyle = .rounded
+        dirButton.font = NSFont.systemFont(ofSize: 11)
+        container.addSubview(dirButton)
+
+        y -= 18
+        transcriptDirLabel = NSTextField(labelWithString: Settings.shared.transcriptDirectory)
+        transcriptDirLabel.frame = NSRect(x: 40, y: y, width: 390, height: 16)
+        transcriptDirLabel.font = NSFont.systemFont(ofSize: 10)
+        transcriptDirLabel.textColor = .secondaryLabelColor
+        transcriptDirLabel.lineBreakMode = .byTruncatingMiddle
+        container.addSubview(transcriptDirLabel)
+
+        y -= 28
+
+        let openButton = NSButton(title: "Open Folder", target: self, action: #selector(openTranscriptDir))
+        openButton.frame = NSRect(x: 20, y: y, width: 100, height: 22)
+        openButton.bezelStyle = .rounded
+        openButton.font = NSFont.systemFont(ofSize: 11)
+        container.addSubview(openButton)
+
+        // Search
+        addLabel("Search:", at: NSPoint(x: 140, y: y + 2), in: container)
+        searchField = NSTextField(frame: NSRect(x: 195, y: y, width: 175, height: 22))
+        searchField.placeholderString = "search transcripts..."
+        searchField.font = NSFont.systemFont(ofSize: 11)
+        searchField.target = self
+        searchField.action = #selector(searchTranscripts)
+        container.addSubview(searchField)
+
+        let searchButton = NSButton(title: "Search", target: self, action: #selector(searchTranscripts))
+        searchButton.frame = NSRect(x: 375, y: y, width: 55, height: 22)
+        searchButton.bezelStyle = .rounded
+        searchButton.font = NSFont.systemFont(ofSize: 11)
+        container.addSubview(searchButton)
+
+        y -= 24
+
+        // Results
+        searchResultsView = NSScrollView(frame: NSRect(x: 20, y: 10, width: 410, height: y - 10))
+        searchResultsView.hasVerticalScroller = true
+        searchResultsView.autohidesScrollers = true
+        searchResultsView.borderType = .bezelBorder
+        searchResultsText = NSTextView(frame: NSRect(x: 0, y: 0, width: 390, height: y - 10))
+        searchResultsText.isEditable = false
+        searchResultsText.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        searchResultsText.textColor = .labelColor
+        searchResultsText.backgroundColor = .textBackgroundColor
+        searchResultsView.documentView = searchResultsText
+        container.addSubview(searchResultsView)
+
+        // Load recent transcripts
+        loadRecentTranscripts()
+
         item.view = container
         return item
+    }
+
+    private func loadRecentTranscripts() {
+        let results = Settings.shared.searchTranscripts(query: "")
+        let recent = results.prefix(20)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        var text = ""
+        for r in recent {
+            let dateStr = formatter.string(from: r.date)
+            let preview = r.text.replacingOccurrences(of: "\n", with: " ")
+            text += "[\(dateStr)] \(preview)\n\n"
+        }
+        if text.isEmpty { text = "No transcripts saved yet." }
+        searchResultsText?.string = text
+    }
+
+    @objc private func saveTranscriptsChanged() {
+        Settings.shared.saveTranscripts = saveTranscriptsCheckbox.state == .on
+    }
+
+    @objc private func chooseTranscriptDir() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = URL(fileURLWithPath: Settings.shared.transcriptDirectory)
+        if panel.runModal() == .OK, let url = panel.url {
+            Settings.shared.transcriptDirectory = url.path
+            transcriptDirLabel.stringValue = url.path
+        }
+    }
+
+    @objc private func openTranscriptDir() {
+        let dir = Settings.shared.transcriptDirectory
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: dir) {
+            try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: dir))
+    }
+
+    @objc private func searchTranscripts() {
+        let query = searchField.stringValue
+        let results = Settings.shared.searchTranscripts(query: query)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        var text = ""
+        for r in results {
+            let dateStr = formatter.string(from: r.date)
+            let preview = r.text.replacingOccurrences(of: "\n", with: " ")
+            text += "[\(dateStr)] \(preview)\n\n"
+        }
+        if text.isEmpty { text = query.isEmpty ? "No transcripts saved yet." : "No results for \"\(query)\"" }
+        searchResultsText.string = text
     }
 
     // MARK: - License Tab
@@ -2756,10 +2961,21 @@ class SettingsViewController: NSViewController {
 
         y -= 50
 
-        // Buy button
+        // Buy button — solid blue
         let buyBtn = NSButton(title: "Buy Voice ($29)", target: self, action: #selector(openCheckout))
-        buyBtn.frame = NSRect(x: 20, y: y, width: 150, height: 28)
+        buyBtn.frame = NSRect(x: 20, y: y, width: 410, height: 36)
         buyBtn.bezelStyle = .rounded
+        buyBtn.wantsLayer = true
+        buyBtn.layer?.backgroundColor = NSColor.systemBlue.cgColor
+        buyBtn.layer?.cornerRadius = 8
+        buyBtn.contentTintColor = .white
+        buyBtn.isBordered = false
+        buyBtn.font = NSFont.boldSystemFont(ofSize: 14)
+        let attrTitle = NSAttributedString(string: "Buy Voice ($29)", attributes: [
+            .foregroundColor: NSColor.white,
+            .font: NSFont.boldSystemFont(ofSize: 14)
+        ])
+        buyBtn.attributedTitle = attrTitle
         container.addSubview(buyBtn)
 
         item.view = container
@@ -3273,7 +3489,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         let pttKey = NSMenuItem(title: hotkeyName, action: nil, keyEquivalent: "")
         pttKey.isEnabled = false
         menu.addItem(pttItem)
-        let popoItem = NSMenuItem(title: "  POPO Mode", action: nil, keyEquivalent: "")
+        let popoItem = NSMenuItem(title: "  Hands-Free (double-tap \(hotkeyName))", action: nil, keyEquivalent: "")
         popoItem.isEnabled = false
         if #available(macOS 14.0, *) { popoItem.image = NSImage(systemSymbolName: "mic.badge.plus", accessibilityDescription: nil) }
         menu.addItem(popoItem)
@@ -3853,7 +4069,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     // MARK: - POPO Mode
 
     func startPopo() {
-        guard case .idle = appState else { return }
+        NSLog("Voice: startPopo called — appState=\(appState)")
+        guard case .idle = appState else {
+            NSLog("Voice: startPopo BLOCKED — appState is not idle")
+            return
+        }
 
         // Reset zero-signal detection state (per D-08)
         zeroBufferCount = 0
@@ -4146,6 +4366,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
             if let text = text {
                 self?.lastTranscription = text
+                Settings.shared.saveTranscript(text)
                 let preview = text.count > 80 ? String(text.prefix(80)) + "..." : text
                 self?.showOverlay(state: .done(preview))
                 self?.autoDismissOverlay(after: 1.5)
