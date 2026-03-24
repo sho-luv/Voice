@@ -580,8 +580,8 @@ class OverlayContentView: NSView {
         didSet { needsDisplay = true }
     }
 
-    // Waveform state (WhatsApp-inspired animated bars)
-    var audioLevels: [Float] = Array(repeating: 0.0, count: 6)  // 6 bars
+    // Waveform state (WhatsApp-inspired animated bars — center tallest, radiates outward)
+    var audioLevels: [Float] = Array(repeating: 0.0, count: 12)  // 12 samples for smooth waveform
     private var animationTimer: Timer?
 
     // Timer state
@@ -609,18 +609,18 @@ class OverlayContentView: NSView {
         elapsedTimer?.invalidate()
         recordingStartTime = Date()
 
-        // Waveform animation at 20fps — reads currentAudioLevel from AppDelegate
-        animationTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 20.0, repeats: true) { [weak self] _ in
+        // Waveform animation at 30fps — reads currentAudioLevel from AppDelegate
+        animationTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             guard let self = self, let delegate = self.appDelegate else { return }
             let level = delegate.currentAudioLevel
 
-            // Smooth shift: each bar blends toward the next, new sample lands at end
+            // Shift history left, push new sample at end
             for i in 0..<(self.audioLevels.count - 1) {
-                self.audioLevels[i] = self.audioLevels[i] * 0.7 + self.audioLevels[i + 1] * 0.3
+                self.audioLevels[i] = self.audioLevels[i + 1]
             }
-            // Amplify for visual impact (raw RMS is small) and smooth into last bar
-            let amplified = min(Float(1.0), level * 8.0)
-            self.audioLevels[self.audioLevels.count - 1] = self.audioLevels[self.audioLevels.count - 1] * 0.5 + amplified * 0.5
+            // Amplify for visual impact (raw RMS is very small)
+            let amplified = min(Float(1.0), level * 12.0)
+            self.audioLevels[self.audioLevels.count - 1] = amplified
 
             self.needsDisplay = true
         }
@@ -637,7 +637,7 @@ class OverlayContentView: NSView {
         elapsedTimer?.invalidate()
         elapsedTimer = nil
         recordingStartTime = nil
-        audioLevels = Array(repeating: 0.0, count: 6)
+        audioLevels = Array(repeating: 0.0, count: 12)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -712,17 +712,32 @@ class OverlayContentView: NSView {
             x += min(nameSize.width, 60) + 8  // cap app name width to avoid overflow
         }
 
-        // Waveform bars — always shown (per D-17)
-        let barCount = audioLevels.count
+        // Waveform bars — WhatsApp-style: center bars tallest, mirrored outward
+        let barCount = 7  // visible bars (odd number for center symmetry)
         let barWidth: CGFloat = 3.0
         let barGap: CGFloat = 2.0
-        let maxBarHeight: CGFloat = bounds.height * 0.6
-        let minBarHeight: CGFloat = 3.0
+        let maxBarHeight: CGFloat = bounds.height * 0.7
+        let minBarHeight: CGFloat = 4.0
         let waveformWidth = CGFloat(barCount) * barWidth + CGFloat(barCount - 1) * barGap
+
+        // Build mirrored levels: center gets latest (loudest), sides get older/quieter
+        // audioLevels has 12 samples; pick recent ones and mirror around center
+        let center = barCount / 2  // index 3 of 0-6
+        var barLevels = [Float](repeating: 0, count: barCount)
+        let latest = audioLevels.count - 1
+        // Center bar = most recent level
+        barLevels[center] = audioLevels[latest]
+        // Mirror outward: each step from center uses an older sample, slightly reduced
+        for offset in 1...center {
+            let sampleIdx = max(0, latest - offset * 2)
+            let level = audioLevels[sampleIdx] * Float(1.0 - Double(offset) * 0.15)
+            barLevels[center - offset] = level
+            barLevels[center + offset] = level
+        }
 
         let waveformX = x
         for i in 0..<barCount {
-            let level = CGFloat(audioLevels[i])
+            let level = CGFloat(barLevels[i])
             let barHeight = max(minBarHeight, level * maxBarHeight)
             let bx = waveformX + CGFloat(i) * (barWidth + barGap)
             let by = bounds.midY - barHeight / 2

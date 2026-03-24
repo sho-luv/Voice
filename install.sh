@@ -126,6 +126,7 @@ else
 fi
 
 # --- Install to /Applications ---
+rm -rf /Applications/Voice.app
 cp -R "${SCRIPT_DIR}/Voice.app" /Applications/Voice.app
 echo "Installed to /Applications/Voice.app"
 
