@@ -55,7 +55,7 @@ class Settings {
             "aiModelAnthropic": "claude-sonnet-4-20250514",
             "apiKeyOpenAI": "",
             "apiKeyAnthropic": "",
-            "whisperModel": "small.en",
+            "whisperModel": "large-v3-turbo-q5_0",
         ])
     }
 
@@ -146,12 +146,16 @@ class Settings {
     }
 
     var whisperModel: String {
-        get { defaults.string(forKey: "whisperModel") ?? "small.en" }
+        get { defaults.string(forKey: "whisperModel") ?? "large-v3-turbo-q5_0" }
         set { defaults.set(newValue, forKey: "whisperModel") }
     }
 
     var whisperModelPath: String {
-        NSHomeDirectory() + "/.local/share/whisper-models/ggml-\(whisperModel).bin"
+        // 1. Check app bundle (self-contained DMG)
+        let bundled = (Bundle.main.resourcePath ?? "") + "/ggml-\(whisperModel).bin"
+        if FileManager.default.fileExists(atPath: bundled) { return bundled }
+        // 2. Fall back to Application Support
+        return NSHomeDirectory() + "/Library/Application Support/Voice/Models/ggml-\(whisperModel).bin"
     }
 
     private func updateLaunchAgent(enabled: Bool) {
@@ -296,6 +300,7 @@ class InputMonitor {
         // Try creating event tap directly — this is the real permission check
         let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue) | (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
 
+        NSLog("Voice: attempting to create event tap...")
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
@@ -304,6 +309,7 @@ class InputMonitor {
             callback: InputMonitor.eventTapCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
+            NSLog("Voice: EVENT TAP FAILED - no accessibility permission")
             return false
         }
 
@@ -311,6 +317,7 @@ class InputMonitor {
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+        NSLog("Voice: event tap created successfully!")
         return true
     }
 
@@ -1285,7 +1292,7 @@ class SettingsViewController: NSViewController {
         // Whisper model
         addLabel("Whisper model:", at: NSPoint(x: 20, y: y), in: container)
         whisperPopup = NSPopUpButton(frame: NSRect(x: 180, y: y - 2, width: 200, height: 26), pullsDown: false)
-        let models = ["small.en", "medium.en", "large-v3"]
+        let models = ["large-v3-turbo-q5_0", "small.en", "medium.en", "large-v3"]
         for m in models {
             whisperPopup.addItem(withTitle: m)
         }
@@ -1595,7 +1602,7 @@ class SettingsViewController: NSViewController {
 
     @objc private func downloadModel() {
         let modelName = Settings.shared.whisperModel
-        let modelDir = NSHomeDirectory() + "/.local/share/whisper-models"
+        let modelDir = NSHomeDirectory() + "/Library/Application Support/Voice/Models"
         let modelFile = "\(modelDir)/ggml-\(modelName).bin"
         let urlString = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-\(modelName).bin"
 
@@ -1657,7 +1664,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     var audioFile: String?
     var previousApp: NSRunningApplication?  // saved before recording to refocus for paste
 
-    let whisperPath = "/opt/homebrew/bin/whisper-cli"
+    var whisperPath: String {
+        let bundled = Bundle.main.resourcePath! + "/whisper-cli"
+        if FileManager.default.fileExists(atPath: bundled) { return bundled }
+        return "/opt/homebrew/bin/whisper-cli"
+    }
     let recPath = "/opt/homebrew/bin/rec"
     let afplayPath = "/usr/bin/afplay"
 

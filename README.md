@@ -8,7 +8,7 @@
 
 Voice is a menu bar and Dock app that replaces cloud-based dictation with fast, private, local transcription. It works everywhere -- terminals, browsers, editors, chat apps -- without sending a single byte off your machine.
 
-Built with [whisper.cpp](https://github.com/ggerganov/whisper.cpp) for transcription and optionally [Ollama](https://ollama.ai), [OpenAI](https://openai.com), or [Anthropic](https://anthropic.com) for AI-powered text cleanup. Inspired by [Wispr Flow](https://wispr.com).
+Built with [whisper.cpp](https://github.com/ggerganov/whisper.cpp) for transcription and optionally [Ollama](https://ollama.ai) for local AI text cleanup. 100% on-device, nothing leaves your machine. Inspired by [Wispr Flow](https://wispr.com).
 
 ---
 
@@ -47,6 +47,40 @@ A floating overlay at the top of the screen shows what's happening:
 
 The menu bar icon (a waveform) also reflects the current state. Click it for options including **Paste Last** to re-insert the most recent transcription. The app also appears in the Dock with its waveform icon.
 
+### Voice Commands
+
+Voice recognizes spoken commands during dictation:
+
+| Command | Action |
+|---------|--------|
+| "scratch that" | Removes the previous sentence |
+| "new paragraph" | Inserts a paragraph break |
+| "new line" | Inserts a line break |
+| "period" / "full stop" | Inserts `.` |
+| "comma" | Inserts `,` |
+| "question mark" | Inserts `?` |
+| "exclamation point" | Inserts `!` |
+| "colon" / "semicolon" | Inserts `:` / `;` |
+| "open/close quote" | Inserts `"` |
+| "open/close parenthesis" | Inserts `(` / `)` |
+
+Voice commands can be toggled on/off in Settings > Dictionary.
+
+### Transcription History
+
+Every transcription is saved automatically. Access from the menu bar > **History** (Cmd+H). History supports:
+
+- Full-text search across all transcriptions
+- Copy any past transcription to clipboard
+- Export history as a text file
+- Delete individual entries or clear all
+
+History is stored locally at `~/Library/Application Support/Voice/history.json`.
+
+### File Transcription
+
+Transcribe audio and video files without recording. Click **Transcribe File...** (Cmd+O) in the menu bar. Supports WAV, MP3, M4A, FLAC, OGG, MP4, MOV, MKV, and WebM. Non-WAV files are automatically converted (requires ffmpeg or uses built-in afconvert).
+
 ## Settings
 
 Open from the menu bar (click the waveform icon > "Settings...") or press **Cmd+,**.
@@ -66,17 +100,24 @@ Open from the menu bar (click the waveform icon > "Settings...") or press **Cmd+
 | Setting | Description | Default |
 |---------|-------------|---------|
 | AI text cleanup | Enable/disable AI post-processing of transcriptions | On |
-| Provider | Ollama (local), OpenAI, or Anthropic | Ollama |
-| Model | Model name for the selected provider | llama3.2:3b |
-| API Key | Required for OpenAI and Anthropic (hidden for Ollama) | -- |
-| Test Connection | Verify the provider is reachable and the key is valid | -- |
+| Model | Ollama model name for text cleanup | llama3.2:3b |
+| Test Connection | Verify Ollama is reachable | -- |
 
 ### Transcription
 
 | Setting | Description | Default |
 |---------|-------------|---------|
-| Whisper model | small.en, medium.en, or large-v3 | small.en |
+| Whisper model | large-v3-turbo-q5_0, small.en, or large-v3 | large-v3-turbo-q5_0 |
 | Download Model | Download the selected model if not already on disk | -- |
+
+### Dictionary
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| Voice commands | Enable/disable spoken commands (scratch that, new paragraph, etc.) | On |
+| Custom words | List of names, jargon, or technical terms to improve recognition | Empty |
+
+Custom dictionary words are passed to whisper as context, which significantly improves recognition of proper nouns, acronyms, and domain-specific terms.
 
 All settings persist across restarts via `UserDefaults` (`~/Library/Preferences/com.local.voice.plist`).
 
@@ -98,15 +139,15 @@ Voice can clean up raw transcription before inserting it:
 - Handles corrections ("scratch that", "no wait" -- keeps only the final version)
 - Adapts tone to context (professional in Mail, casual in Messages, technical in Terminal)
 
-Three providers are supported:
+AI cleanup uses [Ollama](https://ollama.ai) running locally on your machine. Install it and pull a model:
 
-| Provider | Setup |
-|----------|-------|
-| **Ollama** (local) | Install [Ollama](https://ollama.ai), run `ollama pull llama3.2:3b`. No API key needed. |
-| **OpenAI** | Enter your API key in Settings. Default model: `gpt-4o-mini`. |
-| **Anthropic** | Enter your API key in Settings. Default model: `claude-sonnet-4-20250514`. |
+```bash
+brew install ollama
+brew services start ollama
+ollama pull llama3.2:3b
+```
 
-Switch providers and test the connection in the AI tab of Settings. If AI cleanup is disabled (or the provider is unreachable), raw whisper output is used.
+Test the connection in the AI tab of Settings. If AI cleanup is disabled (or Ollama is unreachable), raw whisper output is used.
 
 ## Requirements
 
@@ -124,10 +165,10 @@ If you prefer to build without the installer:
 # Install dependencies
 brew install whisper-cpp sox
 
-# Download the model (465 MB)
-mkdir -p ~/.local/share/whisper-models
-curl -L -o ~/.local/share/whisper-models/ggml-small.en.bin \
-    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
+# Download the model (574 MB)
+mkdir -p ~/Library/Application\ Support/Voice/Models
+curl -L -o ~/Library/Application\ Support/Voice/Models/ggml-large-v3-turbo-q5_0.bin \
+    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin
 
 # Compile
 swiftc -O -o Voice Voice.swift \
@@ -206,8 +247,8 @@ The app must **not be running** when you grant the permission.
 
 **AI cleanup not working**
 - Ollama: confirm it's running (`curl http://localhost:11434/api/tags`) and the model is pulled (`ollama list`)
-- OpenAI/Anthropic: check your API key in Settings and click "Test Connection"
-- Voice falls back to raw transcription silently if the provider is unreachable
+- Click "Test Connection" in Settings to verify
+- Voice falls back to raw transcription silently if Ollama is unreachable
 
 **Settings window appears on relaunch**
 - This was a macOS window restoration issue, now fixed. If it persists: `rm -rf ~/Library/Saved\ Application\ State/com.local.voice.savedState` and relaunch
@@ -217,8 +258,8 @@ The app must **not be running** when you grant the permission.
 ```bash
 pkill -f Voice.app
 rm ~/Library/LaunchAgents/com.local.voice.plist
-# Optionally remove the whisper model:
-rm ~/.local/share/whisper-models/ggml-small.en.bin
+# Optionally remove whisper models:
+rm -rf ~/Library/Application\ Support/Voice/Models
 # Optionally remove settings:
 defaults delete com.local.voice
 ```

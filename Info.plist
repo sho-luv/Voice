@@ -5,11 +5,11 @@
     <key>CFBundleName</key>
     <string>Voice</string>
     <key>CFBundleIdentifier</key>
-    <string>com.local.voice</string>
+    <string>com.faradaysoft.voice</string>
     <key>CFBundleVersion</key>
-    <string>3.0</string>
+    <string>3.2</string>
     <key>CFBundleShortVersionString</key>
-    <string>3.0</string>
+    <string>3.2</string>
     <key>CFBundleExecutable</key>
     <string>Voice</string>
     <key>CFBundlePackageType</key>
@@ -20,5 +20,7 @@
     <string>Voice</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Voice needs microphone access to record speech for transcription.</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 Enfrosec LLC. All rights reserved.</string>
 </dict>
 </plist>

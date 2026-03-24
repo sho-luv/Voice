@@ -3,7 +3,7 @@
 # voice - Record speech, transcribe locally with whisper.cpp, copy to clipboard.
 #
 # Usage: voice [-m MODEL] [-s] [-k]
-#   -m MODEL  Model name (default: small.en). File: ~/.local/share/whisper-models/ggml-MODEL.bin
+#   -m MODEL  Model name (default: large-v3-turbo-q5_0). File: ~/Library/Application Support/Voice/Models/ggml-MODEL.bin
 #   -s        Silence-only mode (auto-stop on 3s silence, no Enter needed)
 #   -k        Keep audio file after transcription
 #
@@ -11,8 +11,8 @@
 set -euo pipefail
 
 # --- Defaults ---
-MODEL_DIR="${HOME}/.local/share/whisper-models"
-MODEL_NAME="small.en"
+MODEL_DIR="${HOME}/Library/Application Support/Voice/Models"
+MODEL_NAME="large-v3-turbo-q5_0"
 SILENCE_ONLY=false
 KEEP_AUDIO=false
 THREADS=8
