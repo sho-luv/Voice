@@ -2,6 +2,7 @@ import Cocoa
 import ApplicationServices
 import UserNotifications
 import AVFoundation
+import CoreAudio
 
 // MARK: - App State
 
@@ -57,6 +58,11 @@ class Settings {
             "apiKeyOpenAI": "",
             "apiKeyAnthropic": "",
             "whisperModel": "large-v3-turbo-q5_0",
+            "micDeviceUID": "",
+            "overlayShowAppName": true,
+            "overlayShowAppIcon": true,
+            "overlayShowWindowTitle": false,
+            "overlayShowTimer": true,
         ])
     }
 
@@ -159,6 +165,31 @@ class Settings {
         return NSHomeDirectory() + "/Library/Application Support/Voice/Models/ggml-\(whisperModel).bin"
     }
 
+    var micDeviceUID: String {
+        get { defaults.string(forKey: "micDeviceUID") ?? "" }
+        set { defaults.set(newValue, forKey: "micDeviceUID") }
+    }
+
+    var overlayShowAppName: Bool {
+        get { defaults.bool(forKey: "overlayShowAppName") }
+        set { defaults.set(newValue, forKey: "overlayShowAppName") }
+    }
+
+    var overlayShowAppIcon: Bool {
+        get { defaults.bool(forKey: "overlayShowAppIcon") }
+        set { defaults.set(newValue, forKey: "overlayShowAppIcon") }
+    }
+
+    var overlayShowWindowTitle: Bool {
+        get { defaults.bool(forKey: "overlayShowWindowTitle") }
+        set { defaults.set(newValue, forKey: "overlayShowWindowTitle") }
+    }
+
+    var overlayShowTimer: Bool {
+        get { defaults.bool(forKey: "overlayShowTimer") }
+        set { defaults.set(newValue, forKey: "overlayShowTimer") }
+    }
+
     private func updateLaunchAgent(enabled: Bool) {
         let plistPath = NSHomeDirectory() + "/Library/LaunchAgents/com.local.voice.plist"
         if enabled {
@@ -185,6 +216,73 @@ class Settings {
             try? FileManager.default.removeItem(atPath: plistPath)
         }
     }
+}
+
+// MARK: - Audio Device Enumeration
+
+struct AudioDevice {
+    let uid: String
+    let name: String
+    let deviceID: AudioDeviceID
+}
+
+func listInputDevices() -> [AudioDevice] {
+    var propAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var dataSize: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &propAddress, 0, nil, &dataSize) == noErr else { return [] }
+
+    let deviceCount = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
+    var deviceIDs = [AudioDeviceID](repeating: 0, count: deviceCount)
+    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &propAddress, 0, nil, &dataSize, &deviceIDs) == noErr else { return [] }
+
+    var inputDevices: [AudioDevice] = []
+    for id in deviceIDs {
+        // Check if device has input channels
+        var inputScope = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamConfiguration,
+            mScope: kAudioObjectPropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var bufSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(id, &inputScope, 0, nil, &bufSize) == noErr, bufSize > 0 else { continue }
+
+        let bufferListPtr = UnsafeMutablePointer<AudioBufferList>.allocate(capacity: 1)
+        defer { bufferListPtr.deallocate() }
+        guard AudioObjectGetPropertyData(id, &inputScope, 0, nil, &bufSize, bufferListPtr) == noErr else { continue }
+
+        let bufferList = UnsafeMutableAudioBufferListPointer(bufferListPtr)
+        let inputChannels = bufferList.reduce(0) { $0 + Int($1.mNumberChannels) }
+        guard inputChannels > 0 else { continue }
+
+        // Get device name
+        var nameAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceNameCFString,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var nameRef: Unmanaged<CFString>? = nil
+        var nameSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        AudioObjectGetPropertyData(id, &nameAddr, 0, nil, &nameSize, &nameRef)
+        let name = nameRef?.takeRetainedValue() as String? ?? ""
+
+        // Get device UID
+        var uidAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var uidRef: Unmanaged<CFString>? = nil
+        var uidSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        AudioObjectGetPropertyData(id, &uidAddr, 0, nil, &uidSize, &uidRef)
+        let uid = uidRef?.takeRetainedValue() as String? ?? ""
+
+        inputDevices.append(AudioDevice(uid: uid, name: name, deviceID: id))
+    }
+    return inputDevices
 }
 
 // MARK: - App Context
@@ -1106,6 +1204,14 @@ class SettingsViewController: NSViewController {
     private var testButton: NSButton!
     private var testResultLabel: NSTextField!
 
+    // Audio tab controls
+    private var micPopup: NSPopUpButton!
+    private var micStatusLabel: NSTextField!
+    private var overlayAppNameCheckbox: NSButton!
+    private var overlayAppIconCheckbox: NSButton!
+    private var overlayWindowTitleCheckbox: NSButton!
+    private var overlayTimerCheckbox: NSButton!
+
     // Transcription tab controls
     private var whisperPopup: NSPopUpButton!
     private var downloadButton: NSButton!
@@ -1123,8 +1229,19 @@ class SettingsViewController: NSViewController {
         view.addSubview(tabView)
 
         tabView.addTabViewItem(makeGeneralTab())
+        tabView.addTabViewItem(makeAudioTab())
         tabView.addTabViewItem(makeAITab())
         tabView.addTabViewItem(makeTranscriptionTab())
+
+        // Listen for audio device changes (per D-06: live mic list updates)
+        var propAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &propAddr, DispatchQueue.main) { [weak self] _, _ in
+            self?.refreshMicList()
+        }
     }
 
     // MARK: - General Tab
@@ -1190,6 +1307,104 @@ class SettingsViewController: NSViewController {
 
         item.view = container
         return item
+    }
+
+    // MARK: - Audio Tab
+
+    private func makeAudioTab() -> NSTabViewItem {
+        let item = NSTabViewItem(identifier: "audio")
+        item.label = "Audio"
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 450, height: 300))
+
+        var y: CGFloat = 260
+
+        // Microphone selector
+        addLabel("Microphone:", at: NSPoint(x: 20, y: y), in: container)
+        micPopup = NSPopUpButton(frame: NSRect(x: 180, y: y - 2, width: 240, height: 26), pullsDown: false)
+        micPopup.target = self
+        micPopup.action = #selector(micChanged)
+        container.addSubview(micPopup)
+        refreshMicList()
+
+        y -= 26
+        micStatusLabel = NSTextField(labelWithString: "")
+        micStatusLabel.frame = NSRect(x: 180, y: y, width: 240, height: 16)
+        micStatusLabel.font = NSFont.systemFont(ofSize: 10)
+        micStatusLabel.textColor = .secondaryLabelColor
+        container.addSubview(micStatusLabel)
+
+        y -= 40
+
+        // Overlay display options section header
+        addLabel("Overlay Display:", at: NSPoint(x: 20, y: y), in: container)
+        y -= 30
+
+        overlayAppNameCheckbox = NSButton(checkboxWithTitle: "Show app name", target: self, action: #selector(overlaySettingChanged))
+        overlayAppNameCheckbox.frame = NSRect(x: 40, y: y, width: 200, height: 22)
+        overlayAppNameCheckbox.state = Settings.shared.overlayShowAppName ? .on : .off
+        container.addSubview(overlayAppNameCheckbox)
+        y -= 28
+
+        overlayAppIconCheckbox = NSButton(checkboxWithTitle: "Show app icon", target: self, action: #selector(overlaySettingChanged))
+        overlayAppIconCheckbox.frame = NSRect(x: 40, y: y, width: 200, height: 22)
+        overlayAppIconCheckbox.state = Settings.shared.overlayShowAppIcon ? .on : .off
+        container.addSubview(overlayAppIconCheckbox)
+        y -= 28
+
+        overlayWindowTitleCheckbox = NSButton(checkboxWithTitle: "Show window title", target: self, action: #selector(overlaySettingChanged))
+        overlayWindowTitleCheckbox.frame = NSRect(x: 40, y: y, width: 200, height: 22)
+        overlayWindowTitleCheckbox.state = Settings.shared.overlayShowWindowTitle ? .on : .off
+        container.addSubview(overlayWindowTitleCheckbox)
+        y -= 28
+
+        overlayTimerCheckbox = NSButton(checkboxWithTitle: "Show recording timer", target: self, action: #selector(overlaySettingChanged))
+        overlayTimerCheckbox.frame = NSRect(x: 40, y: y, width: 200, height: 22)
+        overlayTimerCheckbox.state = Settings.shared.overlayShowTimer ? .on : .off
+        container.addSubview(overlayTimerCheckbox)
+
+        item.view = container
+        return item
+    }
+
+    private func refreshMicList() {
+        guard micPopup != nil else { return }
+        micPopup.removeAllItems()
+        micPopup.addItem(withTitle: "System Default")
+        let devices = listInputDevices()
+        for device in devices {
+            micPopup.addItem(withTitle: device.name)
+            micPopup.lastItem?.representedObject = device.uid as NSString
+        }
+        // Select current saved device
+        let savedUID = Settings.shared.micDeviceUID
+        if savedUID.isEmpty {
+            micPopup.selectItem(at: 0)
+        } else {
+            if let idx = devices.firstIndex(where: { $0.uid == savedUID }) {
+                micPopup.selectItem(at: idx + 1)  // +1 for "System Default"
+            } else {
+                micPopup.selectItem(at: 0)
+                micStatusLabel.stringValue = "Preferred device not available"
+                micStatusLabel.textColor = .systemOrange
+            }
+        }
+    }
+
+    @objc private func micChanged() {
+        if micPopup.indexOfSelectedItem == 0 {
+            Settings.shared.micDeviceUID = ""
+        } else if let uid = micPopup.selectedItem?.representedObject as? String {
+            Settings.shared.micDeviceUID = uid
+        }
+        micStatusLabel.stringValue = ""
+        micStatusLabel.textColor = .secondaryLabelColor
+    }
+
+    @objc private func overlaySettingChanged() {
+        Settings.shared.overlayShowAppName = overlayAppNameCheckbox.state == .on
+        Settings.shared.overlayShowAppIcon = overlayAppIconCheckbox.state == .on
+        Settings.shared.overlayShowWindowTitle = overlayWindowTitleCheckbox.state == .on
+        Settings.shared.overlayShowTimer = overlayTimerCheckbox.state == .on
     }
 
     // MARK: - AI Tab
@@ -1698,6 +1913,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     var audioFileHandle: FileHandle?
     var audioDataSize: UInt32 = 0
     var currentAudioLevel: Float = 0.0  // Exposed for waveform overlay (Plan 03)
+    var zeroBufferCount: Int = 0
+    var zeroSignalWarningShown: Bool = false
     var audioFile: String?
     var previousApp: NSRunningApplication?  // saved before recording to refocus for paste
 
@@ -1898,6 +2115,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     func startRecording() {
         guard case .idle = appState else { return }
 
+        // Reset zero-signal detection state (per D-08)
+        zeroBufferCount = 0
+        zeroSignalWarningShown = false
+
         // Save the currently focused app so we can refocus it before pasting
         previousApp = NSWorkspace.shared.frontmostApplication
 
@@ -1927,6 +2148,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
+
+        // Set selected microphone via CoreAudio (per D-05/D-07)
+        let selectedUID = Settings.shared.micDeviceUID
+        if !selectedUID.isEmpty {
+            let devices = listInputDevices()
+            if let device = devices.first(where: { $0.uid == selectedUID }) {
+                var deviceID = device.deviceID
+                let status = AudioUnitSetProperty(
+                    inputNode.audioUnit!,
+                    kAudioOutputUnitProperty_CurrentDevice,
+                    kAudioUnitScope_Global,
+                    0,
+                    &deviceID,
+                    UInt32(MemoryLayout<AudioDeviceID>.size)
+                )
+                if status != noErr {
+                    NSLog("Voice: Failed to set mic device %@ (status %d), using default", selectedUID, status)
+                }
+            } else {
+                // Per D-07: selected mic disappeared, fall back to system default silently
+                NSLog("Voice: Preferred mic %@ not found, using system default", selectedUID)
+            }
+        }
+
         let hwFormat = inputNode.outputFormat(forBus: 0)
         guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true) else {
             appState = .idle
@@ -1973,8 +2218,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                     sum += sample * sample
                 }
                 let rms = sqrt(sum / Float(max(count, 1)))
+                // Zero-signal detection for AirPods/Bluetooth (per D-08)
                 DispatchQueue.main.async {
                     self.currentAudioLevel = rms
+                    if rms < 0.0001 {
+                        self.zeroBufferCount += 1
+                        // ~2 seconds of silence at 16kHz with 4096 buffer = ~8 buffers
+                        if self.zeroBufferCount > 8 && !self.zeroSignalWarningShown {
+                            self.zeroSignalWarningShown = true
+                            self.showOverlay(state: .error("No audio detected \u{2014} check your microphone"))
+                            // Auto-dismiss warning after 3 seconds and return to recording overlay
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                                if self.appState == .recording {
+                                    self.showOverlay(state: .recording)
+                                }
+                            }
+                        }
+                    } else {
+                        self.zeroBufferCount = 0
+                    }
                 }
             }
         }
@@ -2051,6 +2313,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     func startPopo() {
         guard case .idle = appState else { return }
 
+        // Reset zero-signal detection state (per D-08)
+        zeroBufferCount = 0
+        zeroSignalWarningShown = false
+
         previousApp = NSWorkspace.shared.frontmostApplication
 
         // Show feedback immediately — before engine start
@@ -2081,6 +2347,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
+
+        // Set selected microphone via CoreAudio (per D-05/D-07)
+        let selectedUID = Settings.shared.micDeviceUID
+        if !selectedUID.isEmpty {
+            let devices = listInputDevices()
+            if let device = devices.first(where: { $0.uid == selectedUID }) {
+                var deviceID = device.deviceID
+                let status = AudioUnitSetProperty(
+                    inputNode.audioUnit!,
+                    kAudioOutputUnitProperty_CurrentDevice,
+                    kAudioUnitScope_Global,
+                    0,
+                    &deviceID,
+                    UInt32(MemoryLayout<AudioDeviceID>.size)
+                )
+                if status != noErr {
+                    NSLog("Voice: Failed to set mic device %@ (status %d), using default", selectedUID, status)
+                }
+            } else {
+                // Per D-07: selected mic disappeared, fall back to system default silently
+                NSLog("Voice: Preferred mic %@ not found, using system default", selectedUID)
+            }
+        }
+
         let hwFormat = inputNode.outputFormat(forBus: 0)
         guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true),
               let converter = AVAudioConverter(from: hwFormat, to: targetFormat) else {
@@ -2120,8 +2410,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                     sum += sample * sample
                 }
                 let rms = sqrt(sum / Float(max(count, 1)))
+                // Zero-signal detection for AirPods/Bluetooth (per D-08)
                 DispatchQueue.main.async {
                     self.currentAudioLevel = rms
+                    if rms < 0.0001 {
+                        self.zeroBufferCount += 1
+                        // ~2 seconds of silence at 16kHz with 4096 buffer = ~8 buffers
+                        if self.zeroBufferCount > 8 && !self.zeroSignalWarningShown {
+                            self.zeroSignalWarningShown = true
+                            self.showOverlay(state: .error("No audio detected \u{2014} check your microphone"))
+                            // Auto-dismiss warning after 3 seconds and return to popo overlay
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                                if self.appState == .popo {
+                                    self.showOverlay(state: .popo)
+                                }
+                            }
+                        }
+                    } else {
+                        self.zeroBufferCount = 0
+                    }
                 }
             }
         }
