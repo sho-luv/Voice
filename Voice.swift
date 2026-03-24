@@ -196,6 +196,32 @@ class Settings {
         set { defaults.set(newValue, forKey: "onboardingComplete") }
     }
 
+    // Trial & License
+    var trialStartDate: Date? {
+        get { defaults.object(forKey: "trialStartDate") as? Date }
+        set { defaults.set(newValue, forKey: "trialStartDate") }
+    }
+
+    var licenseKey: String {
+        get { defaults.string(forKey: "licenseKey") ?? "" }
+        set { defaults.set(newValue, forKey: "licenseKey") }
+    }
+
+    var licenseInstanceId: String {
+        get { defaults.string(forKey: "licenseInstanceId") ?? "" }
+        set { defaults.set(newValue, forKey: "licenseInstanceId") }
+    }
+
+    var isLicensed: Bool {
+        get { defaults.bool(forKey: "isLicensed") }
+        set { defaults.set(newValue, forKey: "isLicensed") }
+    }
+
+    var lastLicenseValidation: Date? {
+        get { defaults.object(forKey: "lastLicenseValidation") as? Date }
+        set { defaults.set(newValue, forKey: "lastLicenseValidation") }
+    }
+
     func updateLaunchAgent(enabled: Bool) {
         let plistPath = NSHomeDirectory() + "/Library/LaunchAgents/com.faradaysoft.voice.plist"
         if enabled {
@@ -1247,6 +1273,318 @@ class AnthropicClient: AIClient {
     }
 }
 
+// MARK: - License Manager
+
+enum LicenseState {
+    case trial(daysLeft: Int)
+    case trialExpired
+    case licensed
+    case offlineGrace  // licensed but can't re-validate, working but warning
+    case invalid
+}
+
+class LicenseManager {
+    static let shared = LicenseManager()
+
+    // IMPORTANT: Replace these with actual values from LemonSqueezy dashboard
+    // User must retrieve from: LemonSqueezy Dashboard -> Products -> Voice
+    private let lsStoreId: Int = 0       // TODO: Set from LemonSqueezy dashboard
+    private let lsProductId: Int = 0     // TODO: Set from LemonSqueezy dashboard
+    let checkoutURL = "https://voice.lemonsqueezy.com/checkout"  // TODO: Set actual URL
+
+    private let trialDays = 14
+    private let revalidationIntervalDays = 7
+    private let offlineGraceDays = 3
+
+    private init() {
+        // Set trial start date on very first launch
+        if Settings.shared.trialStartDate == nil {
+            Settings.shared.trialStartDate = Date()
+        }
+    }
+
+    // MARK: - State
+
+    var currentState: LicenseState {
+        // If licensed, check revalidation
+        if Settings.shared.isLicensed && !Settings.shared.licenseKey.isEmpty {
+            if let lastCheck = Settings.shared.lastLicenseValidation {
+                let daysSince = Date().timeIntervalSince(lastCheck) / 86400
+                if daysSince > Double(revalidationIntervalDays + offlineGraceDays) {
+                    return .invalid  // too long without validation
+                } else if daysSince > Double(revalidationIntervalDays) {
+                    return .offlineGrace
+                }
+            }
+            return .licensed
+        }
+
+        // Trial logic
+        guard let startDate = Settings.shared.trialStartDate else {
+            return .trial(daysLeft: trialDays)
+        }
+        let elapsed = Date().timeIntervalSince(startDate) / 86400
+        let daysLeft = trialDays - Int(elapsed)
+        if daysLeft > 0 {
+            return .trial(daysLeft: daysLeft)
+        } else {
+            return .trialExpired
+        }
+    }
+
+    var canRecord: Bool {
+        switch currentState {
+        case .trial, .licensed, .offlineGrace:
+            return true
+        case .trialExpired, .invalid:
+            return false
+        }
+    }
+
+    var trialDaysRemaining: Int? {
+        if case .trial(let days) = currentState { return days }
+        return nil
+    }
+
+    var statusText: String {
+        switch currentState {
+        case .trial(let days): return "Trial: \(days) day\(days == 1 ? "" : "s") left"
+        case .trialExpired: return "Trial expired"
+        case .licensed: return "Licensed"
+        case .offlineGrace: return "Licensed (offline)"
+        case .invalid: return "License invalid"
+        }
+    }
+
+    // MARK: - Activation
+
+    func activate(key: String, completion: @escaping (Bool, String) -> Void) {
+        guard let url = URL(string: "https://api.lemonsqueezy.com/v1/licenses/activate") else {
+            completion(false, "Invalid URL")
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        let machineName = Host.current().localizedName ?? "Mac"
+        let body = "license_key=\(key)&instance_name=\(machineName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "Mac")"
+        request.httpBody = body.data(using: .utf8)
+        request.timeoutInterval = 15
+
+        URLSession.shared.dataTask(with: request) { data, _, error in
+            guard error == nil, let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                DispatchQueue.main.async { completion(false, error?.localizedDescription ?? "Network error") }
+                return
+            }
+
+            let activated = json["activated"] as? Bool ?? false
+            let instanceId = (json["instance"] as? [String: Any])?["id"] as? String
+            let licenseStatus = (json["license_key"] as? [String: Any])?["status"] as? String
+
+            // Verify store_id matches (prevent cross-product key use)
+            let meta = json["meta"] as? [String: Any]
+            let storeId = meta?["store_id"] as? Int
+            if self.lsStoreId != 0 && storeId != self.lsStoreId {
+                DispatchQueue.main.async { completion(false, "Invalid license key for this product") }
+                return
+            }
+
+            if activated, let instanceId = instanceId, licenseStatus == "active" {
+                Settings.shared.licenseKey = key
+                Settings.shared.licenseInstanceId = instanceId
+                Settings.shared.isLicensed = true
+                Settings.shared.lastLicenseValidation = Date()
+                DispatchQueue.main.async { completion(true, "License activated!") }
+            } else {
+                let errorMsg = (json["error"] as? String) ?? "Activation failed"
+                DispatchQueue.main.async { completion(false, errorMsg) }
+            }
+        }.resume()
+    }
+
+    // MARK: - Validation
+
+    func validateIfNeeded() {
+        guard Settings.shared.isLicensed, !Settings.shared.licenseKey.isEmpty else { return }
+        guard let lastCheck = Settings.shared.lastLicenseValidation else {
+            validateOnline()
+            return
+        }
+        let daysSince = Date().timeIntervalSince(lastCheck) / 86400
+        if daysSince >= Double(revalidationIntervalDays) {
+            validateOnline()
+        }
+    }
+
+    private func validateOnline() {
+        guard let url = URL(string: "https://api.lemonsqueezy.com/v1/licenses/validate") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        let body = "license_key=\(Settings.shared.licenseKey)&instance_id=\(Settings.shared.licenseInstanceId)"
+        request.httpBody = body.data(using: .utf8)
+        request.timeoutInterval = 15
+
+        URLSession.shared.dataTask(with: request) { data, _, error in
+            guard error == nil, let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                // Network error — rely on cached state + offline grace
+                return
+            }
+            let valid = json["valid"] as? Bool ?? false
+            if valid {
+                Settings.shared.lastLicenseValidation = Date()
+            } else {
+                // License revoked or invalid — clear licensed state
+                Settings.shared.isLicensed = false
+            }
+        }.resume()
+    }
+
+    // MARK: - Deactivation
+
+    func deactivate() {
+        Settings.shared.licenseKey = ""
+        Settings.shared.licenseInstanceId = ""
+        Settings.shared.isLicensed = false
+        Settings.shared.lastLicenseValidation = nil
+    }
+}
+
+// MARK: - License Expiry Modal
+
+class LicenseExpiryWindowController {
+    static let shared = LicenseExpiryWindowController()
+    private var window: NSWindow?
+
+    func show() {
+        if let w = window, w.isVisible {
+            w.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 300),
+            styleMask: [.titled],  // no close — must enter key or quit
+            backing: .buffered,
+            defer: false
+        )
+        w.title = "Voice"
+        w.center()
+        w.isReleasedWhenClosed = false
+        w.isRestorable = false
+
+        let contentView = NSView(frame: w.contentView!.bounds)
+        contentView.autoresizingMask = [.width, .height]
+
+        // Title: "Your trial has ended" (per D-11)
+        let title = NSTextField(labelWithString: "Your trial has ended")
+        title.font = .systemFont(ofSize: 20, weight: .bold)
+        title.alignment = .center
+        title.frame = NSRect(x: 40, y: 230, width: 340, height: 30)
+        contentView.addSubview(title)
+
+        // Subtitle
+        let subtitle = NSTextField(wrappingLabelWithString: "Enter your license key to continue using Voice, or purchase a license.")
+        subtitle.font = .systemFont(ofSize: 13)
+        subtitle.textColor = .secondaryLabelColor
+        subtitle.alignment = .center
+        subtitle.frame = NSRect(x: 40, y: 190, width: 340, height: 40)
+        contentView.addSubview(subtitle)
+
+        // License key field (per D-12)
+        let keyField = NSTextField(frame: NSRect(x: 60, y: 150, width: 300, height: 28))
+        keyField.placeholderString = "Enter license key"
+        keyField.font = .systemFont(ofSize: 13)
+        contentView.addSubview(keyField)
+
+        // Status label
+        let statusLabel = NSTextField(labelWithString: "")
+        statusLabel.font = .systemFont(ofSize: 12)
+        statusLabel.alignment = .center
+        statusLabel.frame = NSRect(x: 60, y: 125, width: 300, height: 20)
+        contentView.addSubview(statusLabel)
+
+        // Activate button
+        let activateBtn = NSButton(title: "Activate", target: nil, action: nil)
+        activateBtn.frame = NSRect(x: 170, y: 85, width: 100, height: 32)
+        activateBtn.bezelStyle = .rounded
+        activateBtn.keyEquivalent = "\r"  // Enter key
+        contentView.addSubview(activateBtn)
+
+        // Buy button (per D-13): opens LemonSqueezy checkout
+        let buyBtn = NSButton(title: "Buy Voice ($29)", target: nil, action: nil)
+        buyBtn.frame = NSRect(x: 130, y: 45, width: 160, height: 32)
+        buyBtn.bezelStyle = .rounded
+        buyBtn.contentTintColor = .controlAccentColor
+        contentView.addSubview(buyBtn)
+
+        // Quit button
+        let quitBtn = NSButton(title: "Quit", target: NSApp, action: #selector(NSApplication.terminate(_:)))
+        quitBtn.frame = NSRect(x: 20, y: 15, width: 80, height: 28)
+        quitBtn.bezelStyle = .rounded
+        contentView.addSubview(quitBtn)
+
+        // Wire activate action using a helper class to capture references
+        class ActivateHandler: NSObject {
+            let keyField: NSTextField
+            let statusLabel: NSTextField
+            weak var window: NSWindow?
+            init(keyField: NSTextField, statusLabel: NSTextField, window: NSWindow?) {
+                self.keyField = keyField; self.statusLabel = statusLabel; self.window = window
+            }
+            @objc func activate() {
+                let key = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !key.isEmpty else {
+                    statusLabel.stringValue = "Please enter a license key"
+                    statusLabel.textColor = .systemOrange
+                    return
+                }
+                statusLabel.stringValue = "Activating..."
+                statusLabel.textColor = .secondaryLabelColor
+                LicenseManager.shared.activate(key: key) { [weak self] success, message in
+                    self?.statusLabel.stringValue = message
+                    self?.statusLabel.textColor = success ? .systemGreen : .systemRed
+                    if success {
+                        // Per D-14: dismiss modal and app functions normally
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                            self?.window?.close()
+                            LicenseExpiryWindowController.shared.window = nil
+                        }
+                    }
+                }
+            }
+        }
+        let handler = ActivateHandler(keyField: keyField, statusLabel: statusLabel, window: w)
+        // Prevent dealloc by storing as associated object
+        objc_setAssociatedObject(w, "activateHandler", handler, .OBJC_ASSOCIATION_RETAIN)
+        activateBtn.target = handler
+        activateBtn.action = #selector(ActivateHandler.activate)
+
+        // Wire buy action
+        class BuyHandler: NSObject {
+            @objc func buy() {
+                if let url = URL(string: LicenseManager.shared.checkoutURL) {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+        }
+        let buyHandler = BuyHandler()
+        objc_setAssociatedObject(w, "buyHandler", buyHandler, .OBJC_ASSOCIATION_RETAIN)
+        buyBtn.target = buyHandler
+        buyBtn.action = #selector(BuyHandler.buy)
+
+        w.contentView = contentView
+        w.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        window = w
+    }
+}
+
 // MARK: - Onboarding Wizard
 
 class OnboardingWindowController {
@@ -1770,6 +2108,13 @@ class SettingsViewController: NSViewController {
     private var downloadButton: NSButton!
     private var downloadStatusLabel: NSTextField!
 
+    // License tab controls
+    private var licenseStatusLabel = NSTextField(labelWithString: "")
+    private var licenseKeyField = NSTextField()
+    private var activateButton = NSButton(title: "Activate", target: nil, action: nil)
+    private var deactivateButton = NSButton(title: "Deactivate", target: nil, action: nil)
+    private var licenseResultLabel = NSTextField(labelWithString: "")
+
     override func loadView() {
         self.view = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 380))
     }
@@ -1785,6 +2130,7 @@ class SettingsViewController: NSViewController {
         tabView.addTabViewItem(makeGeneralTab())
         tabView.addTabViewItem(makeAITab())
         tabView.addTabViewItem(makeTranscriptionTab())
+        tabView.addTabViewItem(makeLicenseTab())
 
         // Listen for audio device changes (per D-06: live mic list updates)
         var propAddr = AudioObjectPropertyAddress(
@@ -2089,6 +2435,116 @@ class SettingsViewController: NSViewController {
 
         item.view = container
         return item
+    }
+
+    // MARK: - License Tab
+
+    private func makeLicenseTab() -> NSTabViewItem {
+        let item = NSTabViewItem(identifier: "license")
+        item.label = "License"
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 450, height: 300))
+
+        var y: CGFloat = 255
+
+        // Status indicator
+        addLabel("Status:", at: NSPoint(x: 20, y: y), in: container)
+        licenseStatusLabel.frame = NSRect(x: 180, y: y, width: 250, height: 22)
+        licenseStatusLabel.font = .systemFont(ofSize: 13)
+        updateLicenseStatusLabel()
+        container.addSubview(licenseStatusLabel)
+
+        y -= 44
+
+        // License key field
+        addLabel("License key:", at: NSPoint(x: 20, y: y), in: container)
+        licenseKeyField.frame = NSRect(x: 180, y: y - 2, width: 230, height: 26)
+        licenseKeyField.placeholderString = "XXXX-XXXX-XXXX-XXXX"
+        licenseKeyField.font = .systemFont(ofSize: 13)
+        if !Settings.shared.licenseKey.isEmpty {
+            licenseKeyField.stringValue = Settings.shared.licenseKey
+        }
+        container.addSubview(licenseKeyField)
+
+        y -= 44
+
+        // Activate button
+        activateButton.frame = NSRect(x: 180, y: y, width: 100, height: 28)
+        activateButton.bezelStyle = .rounded
+        activateButton.target = self
+        activateButton.action = #selector(activateLicense)
+        container.addSubview(activateButton)
+
+        // Deactivate button (only useful when licensed)
+        deactivateButton.frame = NSRect(x: 290, y: y, width: 120, height: 28)
+        deactivateButton.bezelStyle = .rounded
+        deactivateButton.target = self
+        deactivateButton.action = #selector(deactivateLicense)
+        deactivateButton.isEnabled = Settings.shared.isLicensed
+        container.addSubview(deactivateButton)
+
+        y -= 36
+
+        // Result label
+        licenseResultLabel.frame = NSRect(x: 20, y: y, width: 410, height: 20)
+        licenseResultLabel.font = .systemFont(ofSize: 12)
+        licenseResultLabel.alignment = .left
+        container.addSubview(licenseResultLabel)
+
+        y -= 50
+
+        // Buy button
+        let buyBtn = NSButton(title: "Buy Voice ($29)", target: self, action: #selector(openCheckout))
+        buyBtn.frame = NSRect(x: 20, y: y, width: 150, height: 28)
+        buyBtn.bezelStyle = .rounded
+        container.addSubview(buyBtn)
+
+        item.view = container
+        return item
+    }
+
+    private func updateLicenseStatusLabel() {
+        let state = LicenseManager.shared.currentState
+        licenseStatusLabel.stringValue = LicenseManager.shared.statusText
+        switch state {
+        case .licensed: licenseStatusLabel.textColor = .systemGreen
+        case .offlineGrace: licenseStatusLabel.textColor = .systemYellow
+        case .trial: licenseStatusLabel.textColor = .controlAccentColor
+        case .trialExpired, .invalid: licenseStatusLabel.textColor = .systemRed
+        }
+    }
+
+    @objc private func activateLicense() {
+        let key = licenseKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else {
+            licenseResultLabel.stringValue = "Please enter a license key"
+            licenseResultLabel.textColor = .systemOrange
+            return
+        }
+        licenseResultLabel.stringValue = "Activating..."
+        licenseResultLabel.textColor = .secondaryLabelColor
+        activateButton.isEnabled = false
+        LicenseManager.shared.activate(key: key) { [weak self] success, message in
+            self?.licenseResultLabel.stringValue = message
+            self?.licenseResultLabel.textColor = success ? .systemGreen : .systemRed
+            self?.activateButton.isEnabled = true
+            self?.deactivateButton.isEnabled = Settings.shared.isLicensed
+            self?.updateLicenseStatusLabel()
+        }
+    }
+
+    @objc private func deactivateLicense() {
+        LicenseManager.shared.deactivate()
+        licenseKeyField.stringValue = ""
+        licenseResultLabel.stringValue = "License deactivated"
+        licenseResultLabel.textColor = .secondaryLabelColor
+        deactivateButton.isEnabled = false
+        updateLicenseStatusLabel()
+    }
+
+    @objc private func openCheckout() {
+        if let url = URL(string: LicenseManager.shared.checkoutURL) {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     // MARK: - Helpers
@@ -2575,6 +3031,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         menu.addItem(NSMenuItem.separator())
 
+        // Trial/license status (per D-10) — show for non-licensed users
+        let licenseState = LicenseManager.shared.currentState
+        if case .licensed = licenseState {
+            // Clean menu for licensed users — no status shown
+        } else {
+            let licenseStatusItem = NSMenuItem(title: LicenseManager.shared.statusText, action: nil, keyEquivalent: "")
+            licenseStatusItem.isEnabled = false
+            menu.addItem(licenseStatusItem)
+            menu.addItem(NSMenuItem.separator())
+        }
+
         // Settings & Quit
         let settingsItem = NSMenuItem(title: "Settings\u{2026}", action: #selector(openSettings), keyEquivalent: ",")
         if #available(macOS 14.0, *) { settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil) }
@@ -2589,6 +3056,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         // Setup input monitor
         inputMonitor.onRecordStart = { [weak self] in
+            guard LicenseManager.shared.canRecord else {
+                DispatchQueue.main.async {
+                    LicenseExpiryWindowController.shared.show()
+                }
+                return
+            }
             self?.startRecording()
         }
         inputMonitor.onRecordStop = { [weak self] in
@@ -2598,6 +3071,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             self?.cancelRecording()
         }
         inputMonitor.onPopoStart = { [weak self] in
+            guard LicenseManager.shared.canRecord else {
+                DispatchQueue.main.async {
+                    LicenseExpiryWindowController.shared.show()
+                }
+                return
+            }
             self?.startPopo()
         }
         inputMonitor.onPopoStop = { [weak self] in
@@ -2607,6 +3086,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // First-launch onboarding (per D-05)
         if !Settings.shared.onboardingComplete {
             OnboardingWindowController.shared.show()
+        }
+
+        // License enforcement (per D-07, D-11)
+        LicenseManager.shared.validateIfNeeded()
+        if !LicenseManager.shared.canRecord {
+            LicenseExpiryWindowController.shared.show()
         }
 
         // Start accessibility polling for auto-restart (per D-19, D-20)
@@ -3328,6 +3813,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     // NSMenuDelegate — rebuild mic submenu each time menu opens
     func menuNeedsUpdate(_ menu: NSMenu) {
+        // Update license status text in menu
+        if let item = menu.items.first(where: { $0.title.hasPrefix("Trial:") || $0.title == "Trial expired" || $0.title.hasPrefix("Licensed") || $0.title == "License invalid" }) {
+            item.title = LicenseManager.shared.statusText
+        }
+
         for item in menu.items {
             if item.title == "Microphone", let submenu = item.submenu {
                 submenu.removeAllItems()
