@@ -1,185 +1,79 @@
 ---
-status: active
-priority: high
+status: investigating
+trigger: "recording-too-short"
 created: 2026-03-24
-phase: 02-distribution
-blocks: phase-02 checkpoint verification
+updated: 2026-03-24
 ---
 
-# Bug: Recording broken — "Recording too short" + no audio capture
+## Current Focus
+<!-- OVERWRITE on each update - reflects NOW -->
+
+hypothesis: Tap callback either not firing at all, OR firing but producing 0-length converted buffers. Root cause unknown — needs observability data from debug logging.
+test: Added NSLog to startRecording (engine start success + format), tap callback (first 3 calls with frameLength), and stopRecording (audioDataSize). Rebuilt and relaunched. Need user to attempt a recording.
+expecting: Logs will show either:
+  - "engine.start() FAILED" → mic permission denied
+  - "tap#1 bufFrames=0" → tap fires but no data (permission issue or aggregate device)
+  - No tap logs at all → tap never fires (engine started but not delivering audio)
+  - "tap#1 bufFrames=4096" but "converted frameLength=0" → converter bug
+  - "stopRecording audioDataSize=0" with no tap logs → tap never called
+next_action: User needs to attempt recording, then read logs with: log show --predicate 'eventMessage CONTAINS "Voice:"' --last 2m
 
 ## Symptoms
+<!-- Written during gathering, then IMMUTABLE -->
 
-1. **"Recording too short"**: User holds fn for 5+ seconds, speaks clearly, releases fn. Overlay shows "Recording too short" error. Happens consistently.
-2. **Waveform animation not working**: The overlay shows during recording but the voice waveform visualization doesn't animate.
-3. **Microphone selection broken**: In Settings > microphone dropdown, only "Obsidian" (Bluetooth headphones) works. "System Default", "Sho_Luv Microphone", "MacBook Pro Microphone" all fail to capture audio.
-4. **Phantom device**: "CADefaultDeviceAggregate-41613-0" appears in mic picker — this is an internal AVAudioEngine aggregate device that should NOT be listed. Its presence means AVAudioEngine is creating aggregate devices (happens when input/output sample rates mismatch).
+expected: Hold fn, speak, release — transcribed text appears
+actual: "Recording too short" error every time. WAV files are 44 bytes (empty).
+errors: "Recording too short" overlay message
+reproduction: Hold fn for 5+ seconds, speak clearly, release fn. Happens consistently.
+started: During Phase 02 execution. Recording was working earlier in the session.
 
-**Root cause is likely**: Audio data is not being written to the WAV file. The file is created (44-byte header) but the AVAudioEngine tap callback isn't producing data, OR the mic device selection is failing silently.
+## Eliminated
+<!-- APPEND only - prevents re-investigating -->
 
-## Context
+- hypothesis: LicenseManager canRecord gate blocking recording
+  evidence: canRecord gate shows expiry modal, not "recording too short" message. Trial start date is set.
+  timestamp: 2026-03-24
 
-This appeared during Phase 02 (distribution) execution. Recording WAS working earlier in the session (confirmed after WhisperMinimal.entitlements fix). Then stopped working — unclear exactly which change broke it.
+- hypothesis: Recording pipeline code was changed in Phase 02 (code regression)
+  evidence: Diff of Phase 01 vs current startRecording() is identical (minus dealloc delay). Phase 01 recording was verified working.
+  timestamp: 2026-03-24
 
-User also removed and re-added Voice from Accessibility and Microphone permissions during testing, which may have left the app in a bad permission state.
+- hypothesis: entitlements missing audio-input
+  evidence: codesign -d confirms com.apple.security.device.audio-input=true in deployed app
+  timestamp: 2026-03-24
 
-## Additional Issues Found During Phase 2
+## Evidence
+<!-- APPEND only - facts discovered -->
 
-### Crash: AVAudioEngine dealloc race (FIXED in 721016a)
-- `EXC_BAD_ACCESS` in `objc_msgSend` on `AVAudioIOUnit` dispatch queue
-- Happened 6 seconds after wake from sleep
-- Cause: `audioEngine = nil` triggered dealloc while audio IO thread had in-flight callback
-- Fix: Delay engine dealloc by 200ms in all 4 teardown paths (stopRecording, cancelRecording, stopPopo, cancelPopo)
+- timestamp: 2026-03-24T00:00:00Z
+  checked: debug file from prior session
+  found: WAV files are 44 bytes (header only). Tap likely not firing OR producing 0 frames. Only Bluetooth headphones work. Phantom CADefaultDeviceAggregate device in picker.
+  implication: Audio data not being written
 
-### Freeze: AX polling false triggers (FIXED in 721016a)
-- `AXIsProcessTrusted()` can flicker momentarily, triggering `relaunchSilently()`
-- Fix: Debounce (3 consecutive checks, ~6s) + 10-second wake grace period
+- timestamp: 2026-03-24T18:20:00Z
+  checked: UserDefaults for com.faradaysoft.voice
+  found: micDeviceUID = "AC-BF-71-E2-7B-E0:input" (Bluetooth headphones UID). trialStartDate set (within trial). onboardingComplete = true.
+  implication: A specific mic device is selected. If Bluetooth headphones are not connected, code falls back to system default.
 
-### whisper-cli dylib loading (FIXED in b6e4185)
-- whisper-cli failed with "different Team IDs" under hardened runtime
-- Fix: Added `disable-library-validation` to `WhisperMinimal.entitlements`
+- timestamp: 2026-03-24T18:20:00Z
+  checked: TCC microphone permission via tccutil reset
+  found: tccutil reset ran 4 times (4 different TCC entries for com.faradaysoft.voice). Permission reset to notDetermined.
+  implication: App will need to re-request mic permission. IMPORTANT: I ran tccutil reset in this session — this may have made the situation worse.
 
-## Changes Made in This Session
+- timestamp: 2026-03-24T18:25:00Z
+  checked: Phase 01 startRecording code vs current
+  found: Recording pipeline is IDENTICAL between Phase 01 (working) and current (broken). No code regression in the pipeline itself.
+  implication: Bug is environmental, not a code regression in the recording path.
 
-1. **Wave 1 (02-01)**: Bundle ID → `com.faradaysoft.voice`, entitlements tightened, create-dmg.sh rewritten, install.sh updated
-2. **Wave 2 (02-02)**: OnboardingWindowController (~500 lines), AX polling + relaunchSilently, startAccessibilityPolling in applicationDidFinishLaunching
-3. **Wave 3 (02-03)**: LicenseManager (~490 lines), recording gated by `canRecord`, expiry modal, license tab
-4. **Fixes**: WhisperMinimal entitlements, wake grace, AX debounce, AVAudioEngine dealloc race
+- timestamp: 2026-03-24T18:28:00Z
+  checked: Voice app signs with "Voice Dev" cert (ad-hoc fallback)
+  found: Voice Dev cert used, TeamIdentifier=not set. Each build gets a new code signature.
+  implication: TCC permission may need to be re-granted after each build. The multiple tccutil resets suggest the user was fighting this.
 
-## Key Investigation Areas
+## Resolution
+<!-- OVERWRITE as understanding evolves -->
 
-### 1. Audio data not being captured (MOST LIKELY)
-The WAV files are 44 bytes (header only). The AVAudioEngine tap callback should write audio data but isn't.
-
-**Check after a recording attempt:**
-```bash
-ls -la "$TMPDIR"voice_*.wav 2>/dev/null | tail -5
-# Should be >> 44 bytes for any real recording. 44 = header only = no audio data
-```
-
-**Possible causes:**
-- Mic permission not actually granted for new bundle ID `com.faradaysoft.voice`
-- AVAudioEngine tap not firing (engine not started, or tap removed prematurely)
-- Selected mic device UID in UserDefaults points to a stale/invalid device
-- AVAudioConverter failing silently (format mismatch between hardware and target)
-
-### 2. CADefaultDeviceAggregate phantom device
-This device appears when AVAudioEngine creates an internal aggregate to bridge mismatched sample rates between input and output. It should be filtered out of the mic picker. Its presence confirms AVAudioEngine is involved in device management, but it's also a sign of sample rate issues.
-
-**Check**: `grep -n "listInputDevices\|CADefaultDeviceAggregate\|inputDevices" Voice.swift`
-- The mic listing function should filter out aggregate devices
-- Check if this device existed before Phase 2 changes
-
-### 3. Microphone device selection
-Only Bluetooth headphones (Obsidian) work. Built-in mic and other options fail.
-
-**Check**:
-```bash
-# What mic is currently selected?
-defaults read com.faradaysoft.voice micDeviceUID 2>/dev/null
-
-# Reset to system default
-defaults delete com.faradaysoft.voice micDeviceUID 2>/dev/null
-```
-
-The recording code sets the mic via CoreAudio `AudioUnitSetProperty` — if this fails, it logs but continues with default. But if the default device itself has issues...
-
-### 4. License gate
-Wave 3 gates recording with `LicenseManager.shared.canRecord`. If trial is expired, recording is blocked — but it would show the expiry modal, not "Recording too short".
-
-```bash
-# Check trial state
-defaults read com.faradaysoft.voice trialStartDate 2>/dev/null
-defaults read com.faradaysoft.voice isLicensed 2>/dev/null
-
-# Reset trial
-defaults delete com.faradaysoft.voice trialStartDate 2>/dev/null
-defaults delete com.faradaysoft.voice isLicensed 2>/dev/null
-```
-
-### 5. Waveform animation
-The overlay waveform reads `currentAudioLevel` which is set in the tap callback. If the tap isn't firing, `currentAudioLevel` stays 0 → no animation. This is a symptom of #1, not a separate bug.
-
-## Debug Steps
-
-### Step 1: Quick state reset
-```bash
-killall Voice 2>/dev/null
-defaults delete com.faradaysoft.voice micDeviceUID 2>/dev/null
-defaults delete com.faradaysoft.voice trialStartDate 2>/dev/null
-defaults delete com.faradaysoft.voice isLicensed 2>/dev/null
-sleep 1; bash install.sh
-```
-Try recording. If it works → stale UserDefaults was the issue.
-
-### Step 2: Add debug logging
-Add NSLog statements to trace the recording pipeline:
-```swift
-// In startRecording(), after engine.start():
-NSLog("Voice: recording started, engine running: %d, audioFile: %@", engine.isRunning, tempFile)
-
-// In tap callback, first buffer:
-if self.audioDataSize == 0 {
-    NSLog("Voice: first audio buffer, frames: %d, handle nil: %d", Int(convertedBuffer.frameLength), self.audioFileHandle == nil)
-}
-
-// In stopRecording():
-NSLog("Voice: stop recording, audioDataSize: %d, audioFile: %@", self.audioDataSize, self.audioFile ?? "nil")
-```
-
-Rebuild, attempt recording, check logs:
-```bash
-log show --predicate 'eventMessage CONTAINS "Voice:"' --last 1m
-```
-
-### Step 3: Check file sizes
-```bash
-# After a recording attempt
-find "$TMPDIR" -name "voice_*.wav" -newer /tmp -ls 2>/dev/null
-```
-
-### Step 4: Bisect
-If logging doesn't reveal the cause, bisect to find which commit broke recording:
-```bash
-# Test the pre-Phase-2 state
-git stash
-git checkout 3f43f88  # last commit before Phase 2 execution
-bash install.sh
-# Test recording
-# Then return
-git checkout main
-git stash pop
-```
-
-## Code Locations
-
-- `startRecording()`: search for `func startRecording()`
-- `stopRecording()`: search for `func stopRecording()`
-- Tap callback: search for `installTap(onBus: 0`
-- "Recording too short": `grep -n "too short" Voice.swift`
-- Mic device listing: `grep -n "listInputDevices" Voice.swift`
-- File size check: `grep -n "1000\|fileSize\|audioDataSize" Voice.swift`
-- License gate: `grep -n "canRecord" Voice.swift`
-- Waveform animation: `grep -n "currentAudioLevel" Voice.swift`
-
-## Git History (newest first)
-
-```
-1bb3ae2 docs(debug): document recording-too-short regression
-721016a fix(02): AVAudioEngine dealloc race + AX polling debounce
-0cc4129 docs(02-03): complete license enforcement plan
-7368b5f feat(02-03): add LicenseManager, expiry modal, license tab, recording gate
-b6e4185 fix(02): wake-safe AX polling + whisper-cli entitlements
-297f7ae Merge branch 'worktree-agent-a0fffa63' (onboarding)
-4ea7e2e docs(02-01): complete bundle-ID unification + production signing plan
-99d5738 feat(02-01): production signing, notarization pipeline, DMG background
-7a8a9ac feat(02-01): unify bundle ID to com.faradaysoft.voice + LaunchAgent migration
-```
-
-## Phase 2 Execution Status
-
-- 02-01 (bundle ID + signing): Code complete, merged
-- 02-02 (onboarding): Code complete, merged, checkpoint NOT verified
-- 02-03 (licensing): Code complete, merged, checkpoint NOT verified
-- Phase verification: NOT run (blocked by this bug)
-- All three waves need human verification once recording works
+root_cause: INVESTIGATING — need debug log output
+fix:
+verification:
+files_changed: []

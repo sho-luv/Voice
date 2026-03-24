@@ -191,6 +191,19 @@ class Settings {
         set { defaults.set(newValue, forKey: "overlayShowTimer") }
     }
 
+    var overlayEnabled: Bool {
+        get { defaults.object(forKey: "overlayEnabled") == nil ? true : defaults.bool(forKey: "overlayEnabled") }
+        set { defaults.set(newValue, forKey: "overlayEnabled") }
+    }
+
+    var overlayFontSize: CGFloat {
+        get {
+            let val = defaults.double(forKey: "overlayFontSize")
+            return val > 0 ? CGFloat(val) : 11.0
+        }
+        set { defaults.set(Double(newValue), forKey: "overlayFontSize") }
+    }
+
     var onboardingComplete: Bool {
         get { defaults.bool(forKey: "onboardingComplete") }
         set { defaults.set(newValue, forKey: "onboardingComplete") }
@@ -311,6 +324,9 @@ func listInputDevices() -> [AudioDevice] {
         var uidSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
         AudioObjectGetPropertyData(id, &uidAddr, 0, nil, &uidSize, &uidRef)
         let uid = uidRef?.takeRetainedValue() as String? ?? ""
+
+        // Filter out AVAudioEngine's internal aggregate devices
+        if uid.hasPrefix("CADefaultDeviceAggregate") { continue }
 
         inputDevices.append(AudioDevice(uid: uid, name: name, deviceID: id))
     }
@@ -570,6 +586,81 @@ class InputMonitor {
 
 // MARK: - Overlay Window
 
+// Mini preview of the overlay pill shown in Settings
+class OverlayPreviewView: NSView {
+    var fontSize: CGFloat = 11.0
+
+    override func draw(_ dirtyRect: NSRect) {
+        let pill = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 12, yRadius: 12)
+        NSColor(white: 0.1, alpha: 0.85).setFill()
+        pill.fill()
+
+        let textAttrs: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor.white,
+            .font: NSFont.systemFont(ofSize: fontSize, weight: .medium)
+        ]
+        let smallAttrs: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor(white: 0.7, alpha: 1.0),
+            .font: NSFont.systemFont(ofSize: fontSize - 1, weight: .regular)
+        ]
+
+        let dotSize: CGFloat = 8
+        let barCount = 7
+        let barWidth: CGFloat = 3.0
+        let barGap: CGFloat = 2.0
+        let waveformWidth = CGFloat(barCount) * barWidth + CGFloat(barCount - 1) * barGap
+
+        // Measure total width
+        var totalWidth: CGFloat = dotSize + 6
+        var appNameWidth: CGFloat = 0
+        let sampleApp = "Terminal"
+        if Settings.shared.overlayShowAppName {
+            appNameWidth = min((sampleApp as NSString).size(withAttributes: smallAttrs).width, 60)
+            totalWidth += appNameWidth + 8
+        }
+        totalWidth += waveformWidth + 8
+        let timerStr = "0:05" as NSString
+        let timerWidth = timerStr.size(withAttributes: textAttrs).width
+        if Settings.shared.overlayShowTimer {
+            totalWidth += timerWidth
+        }
+
+        var x = bounds.midX - totalWidth / 2
+
+        // Red dot
+        let dotRect = NSRect(x: x, y: bounds.midY - dotSize / 2, width: dotSize, height: dotSize)
+        NSColor(red: 1.0, green: 0.2, blue: 0.2, alpha: 1.0).setFill()
+        NSBezierPath(ovalIn: dotRect).fill()
+        x += dotSize + 6
+
+        // App name
+        if Settings.shared.overlayShowAppName {
+            let nameSize = (sampleApp as NSString).size(withAttributes: smallAttrs)
+            (sampleApp as NSString).draw(at: NSPoint(x: x, y: bounds.midY - nameSize.height / 2), withAttributes: smallAttrs)
+            x += min(nameSize.width, 60) + 8
+        }
+
+        // Static waveform bars
+        let sampleLevels: [CGFloat] = [0.2, 0.4, 0.6, 0.9, 0.6, 0.4, 0.2]
+        let maxBarHeight: CGFloat = bounds.height * 0.6
+        let minBarHeight: CGFloat = 4.0
+        for i in 0..<barCount {
+            let barHeight = max(minBarHeight, sampleLevels[i] * maxBarHeight)
+            let bx = x + CGFloat(i) * (barWidth + barGap)
+            let by = bounds.midY - barHeight / 2
+            NSColor.white.withAlphaComponent(0.9).setFill()
+            NSBezierPath(roundedRect: NSRect(x: bx, y: by, width: barWidth, height: barHeight), xRadius: barWidth / 2, yRadius: barWidth / 2).fill()
+        }
+        x += waveformWidth + 8
+
+        // Timer
+        if Settings.shared.overlayShowTimer {
+            let timerSize = timerStr.size(withAttributes: textAttrs)
+            timerStr.draw(at: NSPoint(x: x, y: bounds.midY - timerSize.height / 2), withAttributes: textAttrs)
+        }
+    }
+}
+
 class OverlayWindow: NSWindow {
     init() {
         let frame = NSRect(x: 0, y: 0, width: 280, height: 64)
@@ -694,7 +785,7 @@ class OverlayContentView: NSView {
     private func drawCenteredText(icon: String, text: String) {
         let attrs: [NSAttributedString.Key: Any] = [
             .foregroundColor: NSColor.white,
-            .font: NSFont.systemFont(ofSize: 13, weight: .medium)
+            .font: NSFont.systemFont(ofSize: Settings.shared.overlayFontSize + 2, weight: .medium)
         ]
         let fullText = icon + " " + text
         let size = fullText.size(withAttributes: attrs)
@@ -703,28 +794,60 @@ class OverlayContentView: NSView {
     }
 
     private func drawRecordingOverlay() {
-        var x: CGFloat = 12
-
-        // Red dot (recording) or blue dot (POPO)
         let isRecordingState: Bool
         if case .recording = overlayState { isRecordingState = true } else { isRecordingState = false }
+
+        let fontSize = Settings.shared.overlayFontSize
+        let textAttrs: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor.white,
+            .font: NSFont.systemFont(ofSize: fontSize, weight: .medium)
+        ]
+        let smallAttrs: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor(white: 0.7, alpha: 1.0),
+            .font: NSFont.systemFont(ofSize: fontSize - 1, weight: .regular)
+        ]
+
+        // --- Measure total content width first ---
+        let dotSize: CGFloat = 8
+        let barCount = 7
+        let barWidth: CGFloat = 3.0
+        let barGap: CGFloat = 2.0
+        let waveformWidth = CGFloat(barCount) * barWidth + CGFloat(barCount - 1) * barGap
+
+        var totalWidth: CGFloat = dotSize + 6  // dot + gap
+
+        if Settings.shared.overlayShowAppIcon, targetAppIcon != nil {
+            totalWidth += 16 + 4  // icon + gap
+        }
+
+        var appNameWidth: CGFloat = 0
+        if Settings.shared.overlayShowAppName, !targetAppName.isEmpty {
+            let nameSize = (targetAppName as NSString).size(withAttributes: smallAttrs)
+            appNameWidth = min(nameSize.width, 60)
+            totalWidth += appNameWidth + 8
+        }
+
+        totalWidth += waveformWidth + 8  // waveform + gap
+
+        var timerWidth: CGFloat = 0
+        if Settings.shared.overlayShowTimer, recordingStartTime != nil {
+            let elapsed = Int(Date().timeIntervalSince(recordingStartTime!))
+            let timerStr = String(format: "%d:%02d", elapsed / 60, elapsed % 60) as NSString
+            timerWidth = timerStr.size(withAttributes: textAttrs).width
+            totalWidth += timerWidth
+        }
+
+        // --- Draw centered ---
+        var x = bounds.midX - totalWidth / 2
+
+        // Red dot (recording) or blue dot (POPO)
         let dotColor: NSColor = isRecordingState
             ? NSColor(red: 1.0, green: 0.2, blue: 0.2, alpha: 1.0)
             : NSColor(red: 0.2, green: 0.8, blue: 1.0, alpha: 1.0)
-        let dotSize: CGFloat = 8
         let dotRect = NSRect(x: x, y: bounds.midY - dotSize / 2, width: dotSize, height: dotSize)
         dotColor.setFill()
         NSBezierPath(ovalIn: dotRect).fill()
         x += dotSize + 6
-
-        let textAttrs: [NSAttributedString.Key: Any] = [
-            .foregroundColor: NSColor.white,
-            .font: NSFont.systemFont(ofSize: 11, weight: .medium)
-        ]
-        let smallAttrs: [NSAttributedString.Key: Any] = [
-            .foregroundColor: NSColor(white: 0.7, alpha: 1.0),
-            .font: NSFont.systemFont(ofSize: 10, weight: .regular)
-        ]
 
         // App icon (per D-14, D-15)
         if Settings.shared.overlayShowAppIcon, let icon = targetAppIcon {
@@ -740,25 +863,17 @@ class OverlayContentView: NSView {
             let nameSize = nameStr.size(withAttributes: smallAttrs)
             let namePoint = NSPoint(x: x, y: bounds.midY - nameSize.height / 2)
             nameStr.draw(at: namePoint, withAttributes: smallAttrs)
-            x += min(nameSize.width, 60) + 8  // cap app name width to avoid overflow
+            x += min(nameSize.width, 60) + 8
         }
 
         // Waveform bars — WhatsApp-style: center bars tallest, mirrored outward
-        let barCount = 7  // visible bars (odd number for center symmetry)
-        let barWidth: CGFloat = 3.0
-        let barGap: CGFloat = 2.0
         let maxBarHeight: CGFloat = bounds.height * 0.7
         let minBarHeight: CGFloat = 4.0
-        let waveformWidth = CGFloat(barCount) * barWidth + CGFloat(barCount - 1) * barGap
 
-        // Build mirrored levels: center gets latest (loudest), sides get older/quieter
-        // audioLevels has 12 samples; pick recent ones and mirror around center
-        let center = barCount / 2  // index 3 of 0-6
+        let center = barCount / 2
         var barLevels = [Float](repeating: 0, count: barCount)
         let latest = audioLevels.count - 1
-        // Center bar = most recent level
         barLevels[center] = audioLevels[latest]
-        // Mirror outward: each step from center uses an older sample, slightly reduced
         for offset in 1...center {
             let sampleIdx = max(0, latest - offset * 2)
             let level = audioLevels[sampleIdx] * Float(1.0 - Double(offset) * 0.15)
@@ -781,9 +896,7 @@ class OverlayContentView: NSView {
         // Elapsed timer (per D-13)
         if Settings.shared.overlayShowTimer, let startTime = recordingStartTime {
             let elapsed = Int(Date().timeIntervalSince(startTime))
-            let minutes = elapsed / 60
-            let seconds = elapsed % 60
-            let timerStr = String(format: "%d:%02d", minutes, seconds) as NSString
+            let timerStr = String(format: "%d:%02d", elapsed / 60, elapsed % 60) as NSString
             let timerSize = timerStr.size(withAttributes: textAttrs)
             let timerPoint = NSPoint(x: x, y: bounds.midY - timerSize.height / 2)
             timerStr.draw(at: timerPoint, withAttributes: textAttrs)
@@ -2098,10 +2211,14 @@ class SettingsViewController: NSViewController {
     // Audio tab controls
     private var micPopup: NSPopUpButton!
     private var micStatusLabel: NSTextField!
+    private var overlayEnabledCheckbox: NSButton!
     private var overlayAppNameCheckbox: NSButton!
     private var overlayAppIconCheckbox: NSButton!
     private var overlayWindowTitleCheckbox: NSButton!
     private var overlayTimerCheckbox: NSButton!
+    private var overlayFontSizeSlider: NSSlider!
+    private var overlayFontSizeLabel: NSTextField!
+    private var overlayPreview: OverlayPreviewView!
 
     // Transcription tab controls
     private var whisperPopup: NSPopUpButton!
@@ -2234,8 +2351,11 @@ class SettingsViewController: NSViewController {
 
         y -= 40
 
-        // Overlay display options section header
-        addLabel("Overlay Display:", at: NSPoint(x: 20, y: y), in: container)
+        // Overlay display options
+        overlayEnabledCheckbox = NSButton(checkboxWithTitle: "Show overlay bubble", target: self, action: #selector(overlaySettingChanged))
+        overlayEnabledCheckbox.frame = NSRect(x: 20, y: y, width: 200, height: 22)
+        overlayEnabledCheckbox.state = Settings.shared.overlayEnabled ? .on : .off
+        container.addSubview(overlayEnabledCheckbox)
         y -= 30
 
         overlayAppNameCheckbox = NSButton(checkboxWithTitle: "Show app name", target: self, action: #selector(overlaySettingChanged))
@@ -2260,6 +2380,22 @@ class SettingsViewController: NSViewController {
         overlayTimerCheckbox.frame = NSRect(x: 40, y: y, width: 200, height: 22)
         overlayTimerCheckbox.state = Settings.shared.overlayShowTimer ? .on : .off
         container.addSubview(overlayTimerCheckbox)
+
+        y -= 30
+        addLabel("Font size:", at: NSPoint(x: 40, y: y + 2), in: container)
+        overlayFontSizeSlider = NSSlider(value: Double(Settings.shared.overlayFontSize), minValue: 8, maxValue: 18, target: self, action: #selector(overlayFontSizeChanged))
+        overlayFontSizeSlider.frame = NSRect(x: 120, y: y, width: 120, height: 22)
+        container.addSubview(overlayFontSizeSlider)
+        overlayFontSizeLabel = NSTextField(labelWithString: "\(Int(Settings.shared.overlayFontSize))pt")
+        overlayFontSizeLabel.frame = NSRect(x: 245, y: y + 2, width: 40, height: 18)
+        overlayFontSizeLabel.font = NSFont.systemFont(ofSize: 11)
+        overlayFontSizeLabel.textColor = .secondaryLabelColor
+        container.addSubview(overlayFontSizeLabel)
+
+        y -= 50
+        overlayPreview = OverlayPreviewView(frame: NSRect(x: 40, y: y, width: 260, height: 40))
+        overlayPreview.fontSize = Settings.shared.overlayFontSize
+        container.addSubview(overlayPreview)
 
         item.view = container
         return item
@@ -2300,10 +2436,20 @@ class SettingsViewController: NSViewController {
     }
 
     @objc private func overlaySettingChanged() {
+        Settings.shared.overlayEnabled = overlayEnabledCheckbox.state == .on
         Settings.shared.overlayShowAppName = overlayAppNameCheckbox.state == .on
         Settings.shared.overlayShowAppIcon = overlayAppIconCheckbox.state == .on
         Settings.shared.overlayShowWindowTitle = overlayWindowTitleCheckbox.state == .on
         Settings.shared.overlayShowTimer = overlayTimerCheckbox.state == .on
+        overlayPreview.needsDisplay = true
+    }
+
+    @objc private func overlayFontSizeChanged() {
+        let size = CGFloat(Int(overlayFontSizeSlider.doubleValue))
+        Settings.shared.overlayFontSize = size
+        overlayFontSizeLabel.stringValue = "\(Int(size))pt"
+        overlayPreview.fontSize = size
+        overlayPreview.needsDisplay = true
     }
 
     // MARK: - AI Tab
@@ -3107,6 +3253,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             // AX polling timer (started above) will handle relaunch when permission is granted
         }
 
+        // Listen for audio device changes (Bluetooth connect/disconnect)
+        var defaultDeviceAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &defaultDeviceAddr,
+            DispatchQueue.main
+        ) { [weak self] _, _ in
+            NSLog("Voice: default input device changed")
+            guard let self = self else { return }
+            // If currently recording, restart the engine with the new device
+            if case .recording = self.appState {
+                NSLog("Voice: restarting engine mid-recording due to device change")
+                self.audioEngine?.inputNode.removeTap(onBus: 0)
+                self.audioEngine?.stop()
+                self.audioEngine = nil
+                // Small delay for the new device to settle
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    if case .recording = self.appState {
+                        // Re-init engine on current audio data (append to same file)
+                        self.restartRecordingEngine()
+                    }
+                }
+            }
+        }
+
         // Re-create event tap after wake from sleep
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
@@ -3231,6 +3406,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         dismissTimer?.invalidate()
         dismissTimer = nil
 
+        if !Settings.shared.overlayEnabled { return }
+
         guard let contentView = overlayWindow.contentView as? OverlayContentView else { return }
         contentView.overlayState = state
         contentView.appDelegate = self
@@ -3351,11 +3528,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             return
         }
 
+        var tapCallCount = 0
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] buffer, _ in
             guard let self = self else { return }
+            tapCallCount += 1
             // Convert to 16kHz mono Int16
             let ratio = 16000.0 / hwFormat.sampleRate
             let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio)
+            if tapCallCount <= 3 {
+                NSLog("Voice: tap#%d bufFrames=%d ratio=%.4f capacity=%d fileHandleNil=%d",
+                      tapCallCount, Int(buffer.frameLength), ratio, Int(capacity), self.audioFileHandle == nil ? 1 : 0)
+            }
             guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: max(capacity, 1)) else { return }
             var error: NSError?
             let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
@@ -3363,6 +3546,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 return buffer
             }
             converter.convert(to: convertedBuffer, error: &error, withInputFrom: inputBlock)
+            if tapCallCount <= 3 {
+                NSLog("Voice: tap#%d converted frameLength=%d error=%@",
+                      tapCallCount, Int(convertedBuffer.frameLength), error?.localizedDescription ?? "nil")
+            }
             if error == nil, let channelData = convertedBuffer.int16ChannelData {
                 let frameCount = Int(convertedBuffer.frameLength)
                 let data = Data(bytes: channelData[0], count: frameCount * 2)
@@ -3402,6 +3589,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         do {
             try engine.start()
             self.audioEngine = engine
+            NSLog("Voice: engine started OK — sampleRate=%.0f channels=%d format=%@",
+                  hwFormat.sampleRate, hwFormat.channelCount, hwFormat.description)
         } catch {
             inputNode.removeTap(onBus: 0)
             audioFileHandle?.closeFile()
@@ -3411,12 +3600,81 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             updateIcon()
             hideOverlay()
             showNotification(title: "Voice", body: "Failed to start recording: \(error.localizedDescription)")
+            NSLog("Voice: engine.start() FAILED: %@", error.localizedDescription)
+        }
+    }
+
+    // Re-create AVAudioEngine mid-recording after device change (Bluetooth reconnect)
+    func restartRecordingEngine() {
+        let engine = AVAudioEngine()
+        let inputNode = engine.inputNode
+
+        let selectedUID = Settings.shared.micDeviceUID
+        if !selectedUID.isEmpty {
+            let devices = listInputDevices()
+            if let device = devices.first(where: { $0.uid == selectedUID }) {
+                var deviceID = device.deviceID
+                AudioUnitSetProperty(
+                    inputNode.audioUnit!,
+                    kAudioOutputUnitProperty_CurrentDevice,
+                    kAudioUnitScope_Global,
+                    0,
+                    &deviceID,
+                    UInt32(MemoryLayout<AudioDeviceID>.size)
+                )
+            }
+        }
+
+        let hwFormat = inputNode.outputFormat(forBus: 0)
+        guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true),
+              let converter = AVAudioConverter(from: hwFormat, to: targetFormat) else {
+            NSLog("Voice: restartRecordingEngine — failed to create format/converter")
+            return
+        }
+
+        var tapCallCount = 0
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] buffer, _ in
+            guard let self = self else { return }
+            tapCallCount += 1
+            let ratio = 16000.0 / hwFormat.sampleRate
+            let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio)
+            guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: max(capacity, 1)) else { return }
+            var error: NSError?
+            let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
+                outStatus.pointee = .haveData
+                return buffer
+            }
+            converter.convert(to: convertedBuffer, error: &error, withInputFrom: inputBlock)
+            if error == nil, let channelData = convertedBuffer.int16ChannelData {
+                let frameCount = Int(convertedBuffer.frameLength)
+                let data = Data(bytes: channelData[0], count: frameCount * 2)
+                self.audioFileHandle?.write(data)
+                self.audioDataSize += UInt32(frameCount * 2)
+                var sum: Float = 0
+                for i in 0..<frameCount {
+                    let sample = Float(channelData[0][i]) / 32768.0
+                    sum += sample * sample
+                }
+                let rms = sqrt(sum / Float(max(frameCount, 1)))
+                DispatchQueue.main.async { self.currentAudioLevel = rms }
+            }
+        }
+
+        engine.prepare()
+        do {
+            try engine.start()
+            self.audioEngine = engine
+            NSLog("Voice: engine restarted OK after device change — sampleRate=%.0f", hwFormat.sampleRate)
+        } catch {
+            inputNode.removeTap(onBus: 0)
+            NSLog("Voice: restartRecordingEngine FAILED: %@", error.localizedDescription)
         }
     }
 
     func stopRecording() {
         guard case .recording = appState else { return }
 
+        NSLog("Voice: stopRecording — audioDataSize=%d audioFile=%@", audioDataSize, audioFile ?? "nil")
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
         // Delay dealloc — AVAudioIOUnit dispatch queue may have in-flight callbacks
