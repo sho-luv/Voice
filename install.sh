@@ -117,13 +117,17 @@ fi
 # Sign with stable identity so macOS TCC keeps accessibility permission across recompiles.
 # Falls back to ad-hoc if "Voice Dev" certificate isn't in keychain.
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "Voice Dev"; then
-    codesign --force --deep --sign "Voice Dev" "${SCRIPT_DIR}/Voice.app"
+    codesign --force --deep --sign "Voice Dev" --entitlements "${SCRIPT_DIR}/Voice.entitlements" "${SCRIPT_DIR}/Voice.app"
     echo "App bundle created and signed (Voice Dev) at ${SCRIPT_DIR}/Voice.app"
 else
-    codesign --force --deep --sign - "${SCRIPT_DIR}/Voice.app"
+    codesign --force --deep --sign - --entitlements "${SCRIPT_DIR}/Voice.entitlements" "${SCRIPT_DIR}/Voice.app"
     echo "App bundle created (ad-hoc signed) at ${SCRIPT_DIR}/Voice.app"
     echo "Note: You may need to re-grant Accessibility permission after recompiling."
 fi
+
+# --- Install to /Applications ---
+cp -R "${SCRIPT_DIR}/Voice.app" /Applications/Voice.app
+echo "Installed to /Applications/Voice.app"
 
 # --- Install voice CLI tool ---
 VOICE_SH="$(dirname "$SCRIPT_DIR")/voice.sh"

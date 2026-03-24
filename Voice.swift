@@ -1309,8 +1309,8 @@ class SettingsViewController: NSViewController {
         tabView.autoresizingMask = [.width, .height]
         view.addSubview(tabView)
 
-        tabView.addTabViewItem(makeGeneralTab())
         tabView.addTabViewItem(makeAudioTab())
+        tabView.addTabViewItem(makeGeneralTab())
         tabView.addTabViewItem(makeAITab())
         tabView.addTabViewItem(makeTranscriptionTab())
 
@@ -2300,16 +2300,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 let data = Data(bytes: channelData[0], count: frameCount * 2)
                 self.audioFileHandle?.write(data)
                 self.audioDataSize += UInt32(frameCount * 2)
-            }
-            // Calculate RMS level for waveform visualization
-            if let floatData = buffer.floatChannelData {
+                // Calculate RMS level from Int16 data for waveform visualization
                 var sum: Float = 0
-                let count = Int(buffer.frameLength)
-                for i in 0..<count {
-                    let sample = floatData[0][i]
+                for i in 0..<frameCount {
+                    let sample = Float(channelData[0][i]) / 32768.0
                     sum += sample * sample
                 }
-                let rms = sqrt(sum / Float(max(count, 1)))
+                let rms = sqrt(sum / Float(max(frameCount, 1)))
                 // Zero-signal detection for AirPods/Bluetooth (per D-08)
                 DispatchQueue.main.async {
                     self.currentAudioLevel = rms
@@ -2493,15 +2490,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 let data = Data(bytes: channelData[0], count: frameCount * 2)
                 self.audioFileHandle?.write(data)
                 self.audioDataSize += UInt32(frameCount * 2)
-            }
-            if let floatData = buffer.floatChannelData {
+                // Calculate RMS level from Int16 data for waveform visualization
                 var sum: Float = 0
-                let count = Int(buffer.frameLength)
-                for i in 0..<count {
-                    let sample = floatData[0][i]
+                for i in 0..<frameCount {
+                    let sample = Float(channelData[0][i]) / 32768.0
                     sum += sample * sample
                 }
-                let rms = sqrt(sum / Float(max(count, 1)))
+                let rms = sqrt(sum / Float(max(frameCount, 1)))
                 // Zero-signal detection for AirPods/Bluetooth (per D-08)
                 DispatchQueue.main.async {
                     self.currentAudioLevel = rms
