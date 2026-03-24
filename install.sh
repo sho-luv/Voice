@@ -139,14 +139,14 @@ if [[ -f "$VOICE_SH" ]]; then
 fi
 
 # --- LaunchAgent (start on login) ---
-PLIST="${HOME}/Library/LaunchAgents/com.local.voice.plist"
+PLIST="${HOME}/Library/LaunchAgents/com.faradaysoft.voice.plist"
 cat > "$PLIST" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.local.voice</string>
+    <string>com.faradaysoft.voice</string>
     <key>Program</key>
     <string>${APP_DIR}/MacOS/Voice</string>
     <key>RunAtLoad</key>
