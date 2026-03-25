@@ -223,6 +223,11 @@ class Settings {
         set { defaults.set(newValue, forKey: "aiModelOllama") }
     }
 
+    var aiCustomPrompt: String {
+        get { defaults.string(forKey: "aiCustomPrompt") ?? "" }
+        set { defaults.set(newValue, forKey: "aiCustomPrompt") }
+    }
+
     var whisperModel: String {
         get { defaults.string(forKey: "whisperModel") ?? "large-v3-turbo-q5_0" }
         set { defaults.set(newValue, forKey: "whisperModel") }
@@ -419,7 +424,7 @@ class Settings {
         let keysToReset = [
             "hotkeyIndex", "soundsEnabled", "autoStartOnLogin", "popoTimeout",
             "clipboardRestore", "aiEnabled", "aiModelOllama", "whisperModel",
-            "micDeviceUID", "overlayShowAppName", "overlayShowAppIcon",
+            "aiCustomPrompt", "micDeviceUID", "overlayShowAppName", "overlayShowAppIcon",
             "overlayShowWindowTitle", "overlayShowTimer",
             "overlayEnabled", "overlayBackgroundOpacity", "overlayFontSize",
             "overlaySensitivity", "saveTranscripts", "transcriptDirectory"
@@ -622,7 +627,9 @@ struct AppContext {
 // MARK: - Shared Cleanup Prompt
 
 func cleanupSystemPrompt(appContext: AppContext) -> String {
-    """
+    let custom = Settings.shared.aiCustomPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+    let customLine = custom.isEmpty ? "" : "\n    Additional instructions: \(custom)"
+    return """
     You are a speech-to-text cleanup assistant. Your ONLY job is to clean up raw speech transcription:
     1. Remove filler words (um, uh, like, you know, I mean, sort of, basically)
     2. Fix grammar and punctuation
@@ -631,7 +638,7 @@ func cleanupSystemPrompt(appContext: AppContext) -> String {
     5. Add proper capitalization
     6. Preserve the speaker's meaning exactly -- do NOT paraphrase
     7. Output ONLY the cleaned text. No commentary.
-    Context: Writing in \(appContext.appName). \(appContext.toneGuidance)
+    Context: Writing in \(appContext.appName). \(appContext.toneGuidance)\(customLine)
     """
 }
 
@@ -2403,6 +2410,7 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
     private var ollamaInstallButton: NSButton!
     private var testButton: NSButton!
     private var testResultLabel: NSTextField!
+    private var aiCustomPromptField: NSTextField!
 
     // Audio tab controls
     private var micPopup: NSPopUpButton!
@@ -2756,6 +2764,29 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         testResultLabel.lineBreakMode = .byTruncatingTail
         container.addSubview(testResultLabel)
 
+        y -= 40
+
+        // Custom prompt instructions
+        addLabel("Custom instructions:", at: NSPoint(x: 20, y: y), in: container)
+        y -= 4
+        let promptHint = NSTextField(labelWithString: "e.g. \"Never change proper nouns like Claude or Gemini\"")
+        promptHint.frame = NSRect(x: 20, y: y - 16, width: 410, height: 14)
+        promptHint.textColor = .tertiaryLabelColor
+        promptHint.font = NSFont.systemFont(ofSize: 10)
+        container.addSubview(promptHint)
+
+        y -= 34
+
+        aiCustomPromptField = NSTextField(string: Settings.shared.aiCustomPrompt)
+        aiCustomPromptField.frame = NSRect(x: 20, y: y - 40, width: 410, height: 60)
+        aiCustomPromptField.placeholderString = "Add custom instructions for AI text cleanup..."
+        aiCustomPromptField.font = NSFont.systemFont(ofSize: 12)
+        aiCustomPromptField.usesSingleLineMode = false
+        aiCustomPromptField.cell?.wraps = true
+        aiCustomPromptField.cell?.isScrollable = true
+        aiCustomPromptField.delegate = self
+        container.addSubview(aiCustomPromptField)
+
         item.view = container
         return item
     }
@@ -2947,6 +2978,9 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         if let field = obj.object as? NSSearchField, field === transcriptSearchField {
             reloadTranscripts()
         }
+        if let field = obj.object as? NSTextField, field === aiCustomPromptField {
+            Settings.shared.aiCustomPrompt = field.stringValue
+        }
     }
 
     @objc private func copyTranscriptRow() {
@@ -3043,7 +3077,7 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         y -= 50
 
         // Buy button — solid blue
-        let buyBtn = NSButton(title: "Buy Voice ($29)", target: self, action: #selector(openCheckout))
+        let buyBtn = NSButton(title: "Upgrade — $5/mo or $39/yr", target: self, action: #selector(openCheckout))
         buyBtn.frame = NSRect(x: 20, y: y, width: 410, height: 36)
         buyBtn.bezelStyle = .regularSquare
         buyBtn.wantsLayer = true
@@ -3053,7 +3087,7 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         buyBtn.isBordered = true
         buyBtn.isTransparent = false
         buyBtn.font = NSFont.boldSystemFont(ofSize: 14)
-        let attrTitle = NSAttributedString(string: "Buy Voice ($29)", attributes: [
+        let attrTitle = NSAttributedString(string: "Upgrade — $5/mo or $39/yr", attributes: [
             .foregroundColor: NSColor.white,
             .font: NSFont.boldSystemFont(ofSize: 14)
         ])
