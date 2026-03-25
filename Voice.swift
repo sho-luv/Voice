@@ -3602,6 +3602,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         settingsItem.target = self
         if #available(macOS 14.0, *) { settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil) }
         menu.addItem(settingsItem)
+        let updateItem = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+        updateItem.target = self
+        menu.addItem(updateItem)
         menu.addItem(NSMenuItem.separator())
         let quitItem = NSMenuItem(title: "Quit Voice", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
@@ -4630,6 +4633,48 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.textInjector.injectText(text)
         }
+    }
+
+    @objc func checkForUpdates() {
+        let appcastURL = URL(string: "https://faradaysoft.com/appcast.json")!
+        URLSession.shared.dataTask(with: appcastURL) { data, _, error in
+            DispatchQueue.main.async {
+                guard let data = data, error == nil,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let latestVersion = json["version"] as? String,
+                      let downloadURL = json["url"] as? String else {
+                    let alert = NSAlert()
+                    alert.messageText = "Update Check Failed"
+                    alert.informativeText = "Could not reach the update server. Please try again later."
+                    alert.alertStyle = .warning
+                    alert.runModal()
+                    return
+                }
+
+                let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+
+                if latestVersion.compare(currentVersion, options: .numeric) == .orderedDescending {
+                    let alert = NSAlert()
+                    alert.messageText = "Update Available"
+                    alert.informativeText = "Voice \(latestVersion) is available. You have \(currentVersion)."
+                    if let notes = json["notes"] as? String {
+                        alert.informativeText += "\n\n\(notes)"
+                    }
+                    alert.addButton(withTitle: "Download")
+                    alert.addButton(withTitle: "Later")
+                    alert.alertStyle = .informational
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        NSWorkspace.shared.open(URL(string: downloadURL)!)
+                    }
+                } else {
+                    let alert = NSAlert()
+                    alert.messageText = "You're Up to Date"
+                    alert.informativeText = "Voice \(currentVersion) is the latest version."
+                    alert.alertStyle = .informational
+                    alert.runModal()
+                }
+            }
+        }.resume()
     }
 
     @objc func quitApp() {
