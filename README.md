@@ -30,7 +30,7 @@ That's it. The installer takes care of dependencies, model download, compilation
 | Shortcut | Action |
 |----------|--------|
 | **Hold fn** | Push-to-talk. Records while held, transcribes on release. |
-| **Space + fn** | POPO mode. Locks recording on for hands-free dictation. Tap fn again to stop. |
+| **Double-tap fn** | Hands-free mode. Locks recording on for dictation. Tap fn again to stop. |
 | **Escape** | Cancel the current recording. |
 
 The push-to-talk key is configurable in Settings (fn, Right Option, Left Option, or Right Cmd).
@@ -47,39 +47,16 @@ A floating overlay at the top of the screen shows what's happening:
 
 The menu bar icon (a waveform) also reflects the current state. Click it for options including **Paste Last** to re-insert the most recent transcription. The app also appears in the Dock with its waveform icon.
 
-### Voice Commands
-
-Voice recognizes spoken commands during dictation:
-
-| Command | Action |
-|---------|--------|
-| "scratch that" | Removes the previous sentence |
-| "new paragraph" | Inserts a paragraph break |
-| "new line" | Inserts a line break |
-| "period" / "full stop" | Inserts `.` |
-| "comma" | Inserts `,` |
-| "question mark" | Inserts `?` |
-| "exclamation point" | Inserts `!` |
-| "colon" / "semicolon" | Inserts `:` / `;` |
-| "open/close quote" | Inserts `"` |
-| "open/close parenthesis" | Inserts `(` / `)` |
-
-Voice commands can be toggled on/off in Settings > Dictionary.
-
 ### Transcription History
 
-Every transcription is saved automatically. Access from the menu bar > **History** (Cmd+H). History supports:
+When transcript saving is enabled, each finished transcription is written to a local text file. The current app lets you:
 
 - Full-text search across all transcriptions
 - Copy any past transcription to clipboard
-- Export history as a text file
-- Delete individual entries or clear all
+- Choose the save directory
+- Turn transcript saving on or off
 
-History is stored locally at `~/Library/Application Support/Voice/history.json`.
-
-### File Transcription
-
-Transcribe audio and video files without recording. Click **Transcribe File...** (Cmd+O) in the menu bar. Supports WAV, MP3, M4A, FLAC, OGG, MP4, MOV, MKV, and WebM. Non-WAV files are automatically converted (requires ffmpeg or uses built-in afconvert).
+Browse this from **Settings... > Transcription**. By default files are stored in `~/Documents/Voice Transcripts`.
 
 ## Settings
 
@@ -109,17 +86,10 @@ Open from the menu bar (click the waveform icon > "Settings...") or press **Cmd+
 |---------|-------------|---------|
 | Whisper model | large-v3-turbo-q5_0, small.en, or large-v3 | large-v3-turbo-q5_0 |
 | Download Model | Download the selected model if not already on disk | -- |
+| Save transcripts | Save each transcription to a local text file | On |
+| Transcript directory | Folder used for saved transcript files | `~/Documents/Voice Transcripts` |
 
-### Dictionary
-
-| Setting | Description | Default |
-|---------|-------------|---------|
-| Voice commands | Enable/disable spoken commands (scratch that, new paragraph, etc.) | On |
-| Custom words | List of names, jargon, or technical terms to improve recognition | Empty |
-
-Custom dictionary words are passed to whisper as context, which significantly improves recognition of proper nouns, acronyms, and domain-specific terms.
-
-All settings persist across restarts via `UserDefaults` (`~/Library/Preferences/com.local.voice.plist`).
+All settings persist across restarts via `UserDefaults` (`~/Library/Preferences/com.faradaysoft.voice.plist`).
 
 ## How Text Gets Inserted
 
@@ -156,6 +126,10 @@ Test the connection in the AI tab of Settings. If AI cleanup is disabled (or Oll
 - Xcode Command Line Tools (`xcode-select --install`)
 
 The installer will handle `whisper-cpp`, `sox`, and the whisper model automatically.
+
+## Release Docs
+
+For release process documentation, see [RELEASING.md](/Users/sho_luv/home/projects/mine/voice/RELEASING.md). That covers the GitHub Actions release pipeline, signing and notarization setup, versioning rules, and the exact steps for shipping a tagged release.
 
 ## Manual Build
 
@@ -251,17 +225,17 @@ The app must **not be running** when you grant the permission.
 - Voice falls back to raw transcription silently if Ollama is unreachable
 
 **Settings window appears on relaunch**
-- This was a macOS window restoration issue, now fixed. If it persists: `rm -rf ~/Library/Saved\ Application\ State/com.local.voice.savedState` and relaunch
+- This was a macOS window restoration issue, now fixed. If it persists: `rm -rf ~/Library/Saved\ Application\ State/com.faradaysoft.voice.savedState` and relaunch
 
 ## Uninstall
 
 ```bash
 pkill -f Voice.app
-rm ~/Library/LaunchAgents/com.local.voice.plist
+rm ~/Library/LaunchAgents/com.faradaysoft.voice.plist
 # Optionally remove whisper models:
 rm -rf ~/Library/Application\ Support/Voice/Models
 # Optionally remove settings:
-defaults delete com.local.voice
+defaults delete com.faradaysoft.voice
 ```
 
 ## License

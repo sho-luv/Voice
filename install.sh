@@ -1,5 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
+shopt -s nullglob
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BUILD_APP_DIR="${SCRIPT_DIR}/Voice.app"
+INSTALL_APP_DIR="/Applications/Voice.app"
+LAUNCH_AGENT_DIR="${HOME}/Library/LaunchAgents"
+LAUNCH_AGENT_PATH="${LAUNCH_AGENT_DIR}/com.faradaysoft.voice.plist"
+
+find_dylib_source() {
+    local libname="$1"
+    local whisper_lib_dir="$2"
+    local candidate
+    for candidate in \
+        "${whisper_lib_dir}/${libname}" \
+        "/opt/homebrew/lib/${libname}" \
+        "/usr/local/lib/${libname}"
+    do
+        if [[ -f "${candidate}" ]]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
 
 echo "=== Voice Installer ==="
 
@@ -16,7 +40,11 @@ if ! command -v whisper-cli &>/dev/null; then
     brew install whisper-cpp
 fi
 
-# sox is no longer required — audio recording uses native AVFoundation
+# The app records with AVFoundation, but the optional `voice` CLI still uses sox.
+if [[ -f "${SCRIPT_DIR}/voice.sh" ]] && ! command -v rec &>/dev/null; then
+    echo "Installing sox for the voice CLI..."
+    brew install sox
+fi
 
 # --- Optional: Ollama ---
 if ! command -v ollama &>/dev/null; then
@@ -56,14 +84,13 @@ if [[ ! -f "$MODEL_FILE" ]]; then
 fi
 
 # --- Compile app ---
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 echo "Compiling Voice..."
 
 swiftc -O -o "${SCRIPT_DIR}/Voice" "${SCRIPT_DIR}/Voice.swift" \
     -framework Cocoa -framework ApplicationServices -framework UserNotifications -framework AVFoundation -framework CoreAudio
 
 # --- Create app bundle ---
-APP_DIR="${SCRIPT_DIR}/Voice.app/Contents"
+APP_DIR="${BUILD_APP_DIR}/Contents"
 mkdir -p "${APP_DIR}/MacOS"
 mkdir -p "${APP_DIR}/Resources"
 mkdir -p "${APP_DIR}/Frameworks"
@@ -83,18 +110,17 @@ if [[ -n "$WHISPER_CLI" ]]; then
     # Copy all dylibs that whisper-cli depends on (uses @rpath)
     for lib in $(otool -L "$WHISPER_CLI" 2>/dev/null | tail -n +2 | grep '@rpath' | awk '{print $1}'); do
         libname="$(echo "$lib" | sed 's|@rpath/||')"
-        # Find the actual dylib file
-        if [[ -f "$WHISPER_LIB_DIR/$libname" ]]; then
-            cp "$WHISPER_LIB_DIR/$libname" "${APP_DIR}/Frameworks/$libname"
-        elif [[ -f "/opt/homebrew/lib/$libname" ]]; then
-            cp "/opt/homebrew/lib/$libname" "${APP_DIR}/Frameworks/$libname"
+        if source_path="$(find_dylib_source "$libname" "$WHISPER_LIB_DIR")"; then
+            cp "$source_path" "${APP_DIR}/Frameworks/$libname"
+        else
+            echo "Warning: Could not locate ${libname} required by whisper-cli" >&2
         fi
         install_name_tool -change "$lib" "@executable_path/../Frameworks/$libname" \
             "${APP_DIR}/Resources/whisper-cli" 2>/dev/null || true
     done
 
-    # Also copy any /opt/homebrew absolute-path dylibs
-    for lib in $(otool -L "$WHISPER_CLI" 2>/dev/null | tail -n +2 | grep /opt/homebrew | awk '{print $1}'); do
+    # Also copy any Homebrew absolute-path dylibs
+    for lib in $(otool -L "$WHISPER_CLI" 2>/dev/null | tail -n +2 | grep -E '/(opt/homebrew|usr/local)' | awk '{print $1}'); do
         libname="$(basename "$lib")"
         cp "$lib" "${APP_DIR}/Frameworks/$libname"
         install_name_tool -change "$lib" "@executable_path/../Frameworks/$libname" \
@@ -149,12 +175,12 @@ else
 fi
 
 # --- Install to /Applications ---
-rm -rf /Applications/Voice.app
-cp -R "${SCRIPT_DIR}/Voice.app" /Applications/Voice.app
-echo "Installed to /Applications/Voice.app"
+rm -rf "${INSTALL_APP_DIR}"
+cp -R "${BUILD_APP_DIR}" "${INSTALL_APP_DIR}"
+echo "Installed to ${INSTALL_APP_DIR}"
 
 # --- Install voice CLI tool ---
-VOICE_SH="$(dirname "$SCRIPT_DIR")/voice.sh"
+VOICE_SH="${SCRIPT_DIR}/voice.sh"
 if [[ -f "$VOICE_SH" ]]; then
     mkdir -p "${HOME}/bin"
     ln -sf "$VOICE_SH" "${HOME}/bin/voice"
@@ -162,8 +188,8 @@ if [[ -f "$VOICE_SH" ]]; then
 fi
 
 # --- LaunchAgent (start on login) ---
-PLIST="${HOME}/Library/LaunchAgents/com.faradaysoft.voice.plist"
-cat > "$PLIST" << EOF
+mkdir -p "${LAUNCH_AGENT_DIR}"
+cat > "${LAUNCH_AGENT_PATH}" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -171,7 +197,7 @@ cat > "$PLIST" << EOF
     <key>Label</key>
     <string>com.faradaysoft.voice</string>
     <key>Program</key>
-    <string>${APP_DIR}/MacOS/Voice</string>
+    <string>${INSTALL_APP_DIR}/Contents/MacOS/Voice</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -183,7 +209,7 @@ echo "LaunchAgent installed (starts on login)"
 
 # --- Launch ---
 echo "Launching Voice..."
-open "${SCRIPT_DIR}/Voice.app"
+open "${INSTALL_APP_DIR}"
 
 echo ""
 echo "=== Done ==="

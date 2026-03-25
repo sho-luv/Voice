@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint shell scripts
+        run: |
+          bash -n install.sh
+          bash -n create-dmg.sh
+          bash -n voice.sh
+
+      - name: Validate plist
+        run: plutil -lint Info.plist
+
+      - name: Typecheck Swift app
+        run: |
+          mkdir -p /tmp/voice-module-cache
+          swiftc -module-cache-path /tmp/voice-module-cache \
+            -typecheck Voice.swift \
+            -framework Cocoa \
+            -framework ApplicationServices \
+            -framework UserNotifications \
+            -framework AVFoundation \
+            -framework CoreAudio

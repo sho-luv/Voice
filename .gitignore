@@ -11,3 +11,6 @@ _CodeSignature/
 # Temporary test files
 *.log
 .gstack/
+.claude/
+.planning/
+*.dmg

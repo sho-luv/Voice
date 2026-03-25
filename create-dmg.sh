@@ -17,12 +17,34 @@
 #     --password APP_SPECIFIC_PASSWORD
 
 set -euo pipefail
+shopt -s nullglob
 
-VERSION="3.2"
 APP_NAME="Voice"
-DMG_NAME="${APP_NAME}-${VERSION}.dmg"
-CERT="Developer ID Application: Faraday Soft (MWW7M2563A)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${SCRIPT_DIR}/Info.plist" 2>/dev/null || true)"
+if [[ -z "${VERSION}" ]]; then
+    echo "Error: Could not read CFBundleShortVersionString from Info.plist" >&2
+    exit 1
+fi
+DMG_NAME="${APP_NAME}-${VERSION}.dmg"
+CERT="${VOICE_CODESIGN_IDENTITY:-Developer ID Application: Faraday Soft (MWW7M2563A)}"
+NOTARY_PROFILE="${VOICE_NOTARY_PROFILE:-voice-notarize}"
+
+find_dylib_source() {
+    local libname="$1"
+    local candidate
+    for candidate in \
+        "${WHISPER_LIB_DIR}/${libname}" \
+        "/opt/homebrew/lib/${libname}" \
+        "/usr/local/lib/${libname}"
+    do
+        if [[ -f "${candidate}" ]]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
 
 echo "=== Building ${APP_NAME} ${VERSION} DMG ==="
 
@@ -35,9 +57,12 @@ fi
 
 # --- Determine signing identity ---
 USE_DEVELOPER_ID=false
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "${CERT}"; then
+if security find-identity -v -p codesigning 2>/dev/null | grep -Fq "${CERT}"; then
     USE_DEVELOPER_ID=true
     echo "Using Developer ID certificate: ${CERT}"
+elif [[ -n "${VOICE_CODESIGN_IDENTITY:-}" ]]; then
+    echo "Error: Requested signing identity not found: ${CERT}" >&2
+    exit 1
 elif security find-identity -v -p codesigning 2>/dev/null | grep -q "Voice Dev"; then
     CERT="Voice Dev"
     echo "Developer ID not found. Falling back to Voice Dev certificate."
@@ -75,17 +100,17 @@ WHISPER_LIB_DIR="$(dirname "$WHISPER_REAL")/../lib"
 # Copy all dylibs that whisper-cli depends on (uses @rpath)
 for lib in $(otool -L "$WHISPER_CLI" 2>/dev/null | tail -n +2 | grep '@rpath' | awk '{print $1}'); do
     libname="$(echo "$lib" | sed 's|@rpath/||')"
-    if [[ -f "$WHISPER_LIB_DIR/$libname" ]]; then
-        cp "$WHISPER_LIB_DIR/$libname" "${APP_DIR}/Frameworks/$libname"
-    elif [[ -f "/opt/homebrew/lib/$libname" ]]; then
-        cp "/opt/homebrew/lib/$libname" "${APP_DIR}/Frameworks/$libname"
+    if source_path="$(find_dylib_source "$libname")"; then
+        cp "$source_path" "${APP_DIR}/Frameworks/$libname"
+    else
+        echo "Warning: Could not locate ${libname} required by whisper-cli" >&2
     fi
     install_name_tool -change "$lib" "@executable_path/../Frameworks/$libname" \
         "${APP_DIR}/Resources/whisper-cli" 2>/dev/null || true
 done
 
-# Also copy any /opt/homebrew absolute-path dylibs
-for lib in $(otool -L "$WHISPER_CLI" 2>/dev/null | tail -n +2 | grep /opt/homebrew | awk '{print $1}'); do
+# Also copy any Homebrew absolute-path dylibs
+for lib in $(otool -L "$WHISPER_CLI" 2>/dev/null | tail -n +2 | grep -E '/(opt/homebrew|usr/local)' | awk '{print $1}'); do
     libname="$(basename "$lib")"
     cp "$lib" "${APP_DIR}/Frameworks/$libname"
     install_name_tool -change "$lib" "@executable_path/../Frameworks/$libname" \
@@ -171,16 +196,16 @@ fi
 
 # --- Notarization ---
 if [[ "$USE_DEVELOPER_ID" == "true" ]]; then
-    if xcrun notarytool history --keychain-profile "voice-notarize" &>/dev/null 2>&1; then
+    if xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" &>/dev/null 2>&1; then
         echo "Notarizing DMG (this may take a few minutes)..."
-        xcrun notarytool submit "${SCRIPT_DIR}/${DMG_NAME}" --keychain-profile "voice-notarize" --wait
+        xcrun notarytool submit "${SCRIPT_DIR}/${DMG_NAME}" --keychain-profile "${NOTARY_PROFILE}" --wait
         echo "Stapling notarization ticket..."
         xcrun stapler staple "${SCRIPT_DIR}/${DMG_NAME}"
         echo "Notarization complete."
     else
         echo ""
         echo "Notarization credentials not configured. To set up (one-time):"
-        echo "  xcrun notarytool store-credentials voice-notarize \\"
+        echo "  xcrun notarytool store-credentials ${NOTARY_PROFILE} \\"
         echo "    --apple-id YOUR_APPLE_ID \\"
         echo "    --team-id MWW7M2563A \\"
         echo "    --password APP_SPECIFIC_PASSWORD"

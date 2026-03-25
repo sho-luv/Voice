@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    env:
+      VOICE_NOTARY_PROFILE: voice-notarize
+      VOICE_CODESIGN_IDENTITY: ${{ secrets.VOICE_CODESIGN_IDENTITY }}
+      VOICE_BUILD_CERTIFICATE_P12_BASE64: ${{ secrets.VOICE_BUILD_CERTIFICATE_P12_BASE64 }}
+      VOICE_BUILD_CERTIFICATE_PASSWORD: ${{ secrets.VOICE_BUILD_CERTIFICATE_PASSWORD }}
+      VOICE_NOTARY_APPLE_ID: ${{ secrets.VOICE_NOTARY_APPLE_ID }}
+      VOICE_NOTARY_TEAM_ID: ${{ secrets.VOICE_NOTARY_TEAM_ID }}
+      VOICE_NOTARY_APP_SPECIFIC_PASSWORD: ${{ secrets.VOICE_NOTARY_APP_SPECIFIC_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Info.plist)
+          BUILD_NUMBER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' Info.plist)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "build_number=${BUILD_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate tag matches app version
+        if: github.ref_type == 'tag'
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "${TAG_VERSION}" != "${{ steps.version.outputs.version }}" ]]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match Info.plist version ${{ steps.version.outputs.version }}"
+            exit 1
+          fi
+
+      - name: Require release secrets
+        if: github.ref_type == 'tag'
+        run: |
+          missing=()
+          for var_name in \
+            VOICE_CODESIGN_IDENTITY \
+            VOICE_BUILD_CERTIFICATE_P12_BASE64 \
+            VOICE_BUILD_CERTIFICATE_PASSWORD \
+            VOICE_NOTARY_APPLE_ID \
+            VOICE_NOTARY_TEAM_ID \
+            VOICE_NOTARY_APP_SPECIFIC_PASSWORD
+          do
+            if [[ -z "${!var_name}" ]]; then
+              missing+=("${var_name}")
+            fi
+          done
+
+          if (( ${#missing[@]} > 0 )); then
+            printf '::error::Missing GitHub release secrets: %s\n' "${missing[*]}"
+            exit 1
+          fi
+
+      - name: Install release dependencies
+        run: brew install whisper-cpp create-dmg
+
+      - name: Import signing certificate
+        id: keychain
+        if: env.VOICE_BUILD_CERTIFICATE_P12_BASE64 != '' && env.VOICE_BUILD_CERTIFICATE_PASSWORD != ''
+        run: |
+          KEYCHAIN_PATH="${RUNNER_TEMP}/voice-build.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+          CERT_PATH="${RUNNER_TEMP}/voice-cert.p12"
+          CERT_B64_PATH="${RUNNER_TEMP}/voice-cert.p12.b64"
+
+          printf '%s' "${VOICE_BUILD_CERTIFICATE_P12_BASE64}" > "${CERT_B64_PATH}"
+          base64 -D -i "${CERT_B64_PATH}" -o "${CERT_PATH}"
+
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security import "${CERT_PATH}" -k "${KEYCHAIN_PATH}" -P "${VOICE_BUILD_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security list-keychain -d user -s "${KEYCHAIN_PATH}" $(security list-keychains -d user | tr -d '"')
+          security default-keychain -s "${KEYCHAIN_PATH}"
+
+          echo "path=${KEYCHAIN_PATH}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure notarization profile
+        if: env.VOICE_NOTARY_APPLE_ID != '' && env.VOICE_NOTARY_TEAM_ID != '' && env.VOICE_NOTARY_APP_SPECIFIC_PASSWORD != ''
+        run: |
+          xcrun notarytool store-credentials "${VOICE_NOTARY_PROFILE}" \
+            --apple-id "${VOICE_NOTARY_APPLE_ID}" \
+            --team-id "${VOICE_NOTARY_TEAM_ID}" \
+            --password "${VOICE_NOTARY_APP_SPECIFIC_PASSWORD}"
+
+      - name: Build signed DMG
+        run: ./create-dmg.sh
+
+      - name: Resolve DMG path
+        id: dmg
+        run: |
+          DMG_PATH="Voice-${{ steps.version.outputs.version }}.dmg"
+          if [[ ! -f "${DMG_PATH}" ]]; then
+            echo "::error::Expected DMG not found at ${DMG_PATH}"
+            exit 1
+          fi
+          echo "path=${DMG_PATH}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Voice-${{ steps.version.outputs.version }}-dmg
+          path: ${{ steps.dmg.outputs.path }}
+
+      - name: Publish GitHub release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Voice ${{ steps.version.outputs.version }}
+          tag_name: ${{ github.ref_name }}
+          files: ${{ steps.dmg.outputs.path }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          if [[ -n "${{ steps.keychain.outputs.path }}" ]] && [[ -f "${{ steps.keychain.outputs.path }}" ]]; then
+            security delete-keychain "${{ steps.keychain.outputs.path }}"
+          fi
