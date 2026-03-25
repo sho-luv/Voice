@@ -245,7 +245,7 @@ class Settings {
             try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
         }
         let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss-SSS"
         let filename = "voice_\(formatter.string(from: Date())).txt"
         let path = (dir as NSString).appendingPathComponent(filename)
         try? text.write(toFile: path, atomically: true, encoding: .utf8)
@@ -257,7 +257,9 @@ class Settings {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(atPath: dir) else { return [] }
         let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss-SSS"
+        let legacyFormatter = DateFormatter()
+        legacyFormatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
 
         var results: [(date: Date, text: String, path: String)] = []
         for file in files.sorted().reversed() where file.hasSuffix(".txt") {
@@ -265,7 +267,7 @@ class Settings {
             guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
             if query.isEmpty || content.localizedCaseInsensitiveContains(query) {
                 let datePart = file.replacingOccurrences(of: "voice_", with: "").replacingOccurrences(of: ".txt", with: "")
-                let date = formatter.date(from: datePart) ?? Date()
+                let date = formatter.date(from: datePart) ?? legacyFormatter.date(from: datePart) ?? Date()
                 results.append((date: date, text: content, path: path))
             }
         }
@@ -321,8 +323,10 @@ class Settings {
     }
 
     func updateLaunchAgent(enabled: Bool) {
-        let plistPath = NSHomeDirectory() + "/Library/LaunchAgents/com.faradaysoft.voice.plist"
+        let launchAgentDir = NSHomeDirectory() + "/Library/LaunchAgents"
+        let plistPath = launchAgentDir + "/com.faradaysoft.voice.plist"
         if enabled {
+            try? FileManager.default.createDirectory(atPath: launchAgentDir, withIntermediateDirectories: true)
             // Find the current executable
             let execPath = Bundle.main.executablePath ?? "/Applications/Voice.app/Contents/MacOS/Voice"
             let plist = """
@@ -380,10 +384,14 @@ func listInputDevices() -> [AudioDevice] {
         var bufSize: UInt32 = 0
         guard AudioObjectGetPropertyDataSize(id, &inputScope, 0, nil, &bufSize) == noErr, bufSize > 0 else { continue }
 
-        let bufferListPtr = UnsafeMutablePointer<AudioBufferList>.allocate(capacity: 1)
-        defer { bufferListPtr.deallocate() }
-        guard AudioObjectGetPropertyData(id, &inputScope, 0, nil, &bufSize, bufferListPtr) == noErr else { continue }
+        let bufferListStorage = UnsafeMutableRawPointer.allocate(
+            byteCount: Int(bufSize),
+            alignment: MemoryLayout<AudioBufferList>.alignment
+        )
+        defer { bufferListStorage.deallocate() }
+        guard AudioObjectGetPropertyData(id, &inputScope, 0, nil, &bufSize, bufferListStorage) == noErr else { continue }
 
+        let bufferListPtr = bufferListStorage.assumingMemoryBound(to: AudioBufferList.self)
         let bufferList = UnsafeMutableAudioBufferListPointer(bufferListPtr)
         let inputChannels = bufferList.reduce(0) { $0 + Int($1.mNumberChannels) }
         guard inputChannels > 0 else { continue }
@@ -416,6 +424,23 @@ func listInputDevices() -> [AudioDevice] {
         inputDevices.append(AudioDevice(uid: uid, name: name, deviceID: id))
     }
     return inputDevices
+}
+
+func resolveExecutablePath(named name: String, bundledResource: Bool = false) -> String? {
+    if bundledResource, let resourcePath = Bundle.main.resourcePath {
+        let bundled = (resourcePath as NSString).appendingPathComponent(name)
+        if FileManager.default.isExecutableFile(atPath: bundled) {
+            return bundled
+        }
+    }
+
+    let candidates = [
+        "/opt/homebrew/bin/\(name)",
+        "/usr/local/bin/\(name)",
+        "/usr/bin/\(name)",
+        "/bin/\(name)",
+    ]
+    return candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
 }
 
 // MARK: - App Context
@@ -1578,11 +1603,8 @@ enum LicenseState {
 class LicenseManager {
     static let shared = LicenseManager()
 
-    // IMPORTANT: Replace these with actual values from LemonSqueezy dashboard
-    // User must retrieve from: LemonSqueezy Dashboard -> Products -> Voice
-    private let lsStoreId: Int = 0       // TODO: Set from LemonSqueezy dashboard
-    private let lsProductId: Int = 0     // TODO: Set from LemonSqueezy dashboard
-    let checkoutURL = "https://voice.lemonsqueezy.com/checkout"  // TODO: Set actual URL
+    private let lsProductId: Int = 912013
+    let checkoutURL = "https://faradaysoft.lemonsqueezy.com/checkout/buy/2617c440-f8d4-49c7-b6fd-4cbb15ed95fd"
 
     private let trialDays = 14
     private let revalidationIntervalDays = 7
@@ -1674,14 +1696,6 @@ class LicenseManager {
             let activated = json["activated"] as? Bool ?? false
             let instanceId = (json["instance"] as? [String: Any])?["id"] as? String
             let licenseStatus = (json["license_key"] as? [String: Any])?["status"] as? String
-
-            // Verify store_id matches (prevent cross-product key use)
-            let meta = json["meta"] as? [String: Any]
-            let storeId = meta?["store_id"] as? Int
-            if self.lsStoreId != 0 && storeId != self.lsStoreId {
-                DispatchQueue.main.async { completion(false, "Invalid license key for this product") }
-                return
-            }
 
             if activated, let instanceId = instanceId, licenseStatus == "active" {
                 Settings.shared.licenseKey = key
@@ -1809,7 +1823,7 @@ class LicenseExpiryWindowController {
         contentView.addSubview(activateBtn)
 
         // Buy button (per D-13): opens LemonSqueezy checkout
-        let buyBtn = NSButton(title: "Buy Voice ($29)", target: nil, action: nil)
+        let buyBtn = NSButton(title: "Subscribe — $5/mo or $39/yr", target: nil, action: nil)
         buyBtn.frame = NSRect(x: 130, y: 45, width: 160, height: 32)
         buyBtn.bezelStyle = .rounded
         buyBtn.contentTintColor = .controlAccentColor
@@ -2622,6 +2636,8 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         micPopup.removeAllItems()
         micPopup.addItem(withTitle: "System Default")
         let devices = listInputDevices()
+        micStatusLabel.stringValue = ""
+        micStatusLabel.textColor = .secondaryLabelColor
         for device in devices {
             micPopup.addItem(withTitle: device.name)
             micPopup.lastItem?.representedObject = device.uid as NSString
@@ -3330,9 +3346,18 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         ollamaStatusLabel.textColor = .secondaryLabelColor
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let brewPath = resolveExecutablePath(named: "brew") else {
+                DispatchQueue.main.async {
+                    self?.ollamaStatusLabel.stringValue = "Homebrew not found"
+                    self?.ollamaStatusLabel.textColor = .systemRed
+                    self?.ollamaInstallButton.isEnabled = true
+                }
+                return
+            }
+
             // Step 1: brew install ollama
             let brewInstall = Process()
-            brewInstall.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/brew")
+            brewInstall.executableURL = URL(fileURLWithPath: brewPath)
             brewInstall.arguments = ["install", "ollama"]
             let installPipe = Pipe()
             brewInstall.standardOutput = installPipe
@@ -3368,7 +3393,7 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
             }
 
             let brewStart = Process()
-            brewStart.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/brew")
+            brewStart.executableURL = URL(fileURLWithPath: brewPath)
             brewStart.arguments = ["services", "start", "ollama"]
             brewStart.standardOutput = FileHandle.nullDevice
             brewStart.standardError = FileHandle.nullDevice
@@ -3383,8 +3408,17 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
                 self?.ollamaStatusLabel.stringValue = "Pulling llama3.2:3b model..."
             }
 
+            guard let ollamaPath = resolveExecutablePath(named: "ollama") else {
+                DispatchQueue.main.async {
+                    self?.ollamaStatusLabel.stringValue = "Ollama install succeeded, but the binary was not found"
+                    self?.ollamaStatusLabel.textColor = .systemRed
+                    self?.ollamaInstallButton.isEnabled = true
+                }
+                return
+            }
+
             let pull = Process()
-            pull.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/ollama")
+            pull.executableURL = URL(fileURLWithPath: ollamaPath)
             pull.arguments = ["pull", "llama3.2:3b"]
             let pullPipe = Pipe()
             pull.standardOutput = pullPipe
@@ -3536,11 +3570,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     var previousApp: NSRunningApplication?  // saved before recording to refocus for paste
 
     var whisperPath: String {
-        let bundled = Bundle.main.resourcePath! + "/whisper-cli"
-        if FileManager.default.fileExists(atPath: bundled) { return bundled }
+        if let resolved = resolveExecutablePath(named: "whisper-cli", bundledResource: true) {
+            return resolved
+        }
         return "/opt/homebrew/bin/whisper-cli"
     }
-    let afplayPath = "/usr/bin/afplay"
+    let afplayPath = resolveExecutablePath(named: "afplay") ?? "/usr/bin/afplay"
 
     let inputMonitor = InputMonitor()
     let textInjector = TextInjector()
@@ -3759,6 +3794,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             }
         }
 
+        // License validation
+        LicenseManager.shared.validateIfNeeded()
+        if !LicenseManager.shared.canRecord {
+            LicenseExpiryWindowController.shared.show()
+        }
+
         // Preflight checks
         if !FileManager.default.fileExists(atPath: Settings.shared.whisperModelPath) {
             showNotification(title: "Voice", body: "Whisper model not found at \(Settings.shared.whisperModelPath)")
@@ -3910,6 +3951,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
     }
 
+    private func abortCaptureStartup(tempFile: String, popo: Bool, message: String) {
+        audioFileHandle?.closeFile()
+        audioFileHandle = nil
+        cleanup(tempFile)
+        audioFile = nil
+        appState = .idle
+        inputMonitor.setRecording(false)
+        if popo {
+            inputMonitor.setPopo(false)
+        }
+        updateIcon()
+        hideOverlay()
+        showNotification(title: "Voice", body: message)
+    }
+
     // MARK: - Recording
 
     func startRecording() {
@@ -3935,11 +3991,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // Create WAV file with 44-byte placeholder header
         FileManager.default.createFile(atPath: tempFile, contents: Data(count: 44))
         guard let handle = FileHandle(forWritingAtPath: tempFile) else {
-            appState = .idle
-            inputMonitor.setRecording(false)
-            updateIcon()
-            hideOverlay()
-            showNotification(title: "Voice", body: "Failed to create audio file")
+            abortCaptureStartup(tempFile: tempFile, popo: false, message: "Failed to create audio file")
             return
         }
         handle.seek(toFileOffset: 44)
@@ -3987,30 +4039,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
 
         guard hwFormat.channelCount > 0, hwFormat.sampleRate > 0 else {
-            appState = .idle
-            inputMonitor.setRecording(false)
-            updateIcon()
-            hideOverlay()
-            showNotification(title: "Voice", body: "No valid microphone found")
+            abortCaptureStartup(tempFile: tempFile, popo: false, message: "No valid microphone found")
             NSLog("Voice: FATAL — no valid audio format even with system default mic")
             return
         }
 
         guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true) else {
-            appState = .idle
-            inputMonitor.setRecording(false)
-            updateIcon()
-            hideOverlay()
-            showNotification(title: "Voice", body: "Failed to create audio format")
+            abortCaptureStartup(tempFile: tempFile, popo: false, message: "Failed to create audio format")
             return
         }
 
         guard let converter = AVAudioConverter(from: hwFormat, to: targetFormat) else {
-            appState = .idle
-            inputMonitor.setRecording(false)
-            updateIcon()
-            hideOverlay()
-            showNotification(title: "Voice", body: "Failed to create audio converter (hw: \(hwFormat))")
+            abortCaptureStartup(tempFile: tempFile, popo: false, message: "Failed to create audio converter")
             NSLog("Voice: converter creation failed — hwFormat=%@", hwFormat.description)
             return
         }
@@ -4246,12 +4286,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // Create WAV file with 44-byte placeholder header
         FileManager.default.createFile(atPath: tempFile, contents: Data(count: 44))
         guard let handle = FileHandle(forWritingAtPath: tempFile) else {
-            appState = .idle
-            inputMonitor.setRecording(false)
-            inputMonitor.setPopo(false)
-            updateIcon()
-            hideOverlay()
-            showNotification(title: "Voice", body: "Failed to create audio file")
+            abortCaptureStartup(tempFile: tempFile, popo: true, message: "Failed to create audio file")
             return
         }
         handle.seek(toFileOffset: 44)
@@ -4297,27 +4332,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
 
         guard hwFormat.channelCount > 0, hwFormat.sampleRate > 0 else {
-            audioFileHandle?.closeFile()
-            audioFileHandle = nil
-            appState = .idle
-            inputMonitor.setRecording(false)
-            inputMonitor.setPopo(false)
-            updateIcon()
-            hideOverlay()
-            showNotification(title: "Voice", body: "No valid microphone found")
+            abortCaptureStartup(tempFile: tempFile, popo: true, message: "No valid microphone found")
             return
         }
 
         guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true),
               let converter = AVAudioConverter(from: hwFormat, to: targetFormat) else {
-            audioFileHandle?.closeFile()
-            audioFileHandle = nil
-            appState = .idle
-            inputMonitor.setRecording(false)
-            inputMonitor.setPopo(false)
-            updateIcon()
-            hideOverlay()
-            showNotification(title: "Voice", body: "Failed to create audio converter")
+            abortCaptureStartup(tempFile: tempFile, popo: true, message: "Failed to create audio converter")
             return
         }
 
