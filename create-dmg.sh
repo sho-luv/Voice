@@ -78,7 +78,9 @@ echo "Compiling..."
 swiftc -O -o "${SCRIPT_DIR}/Voice" "${SCRIPT_DIR}/Voice.swift" \
     -framework Cocoa -framework ApplicationServices \
     -framework UserNotifications -framework AVFoundation \
-    -framework CoreAudio
+    -framework CoreAudio \
+    -Xlinker -x \
+    -Xlinker -dead_strip
 
 # --- Create app bundle ---
 echo "Creating app bundle..."
