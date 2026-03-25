@@ -3465,6 +3465,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         // Actions
         let pasteItem = NSMenuItem(title: "Paste Last Transcription", action: #selector(pasteLast), keyEquivalent: "v")
+        pasteItem.target = self
         if #available(macOS 14.0, *) { pasteItem.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: nil) }
         menu.addItem(pasteItem)
 
@@ -3492,10 +3493,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         // Settings & Quit
         let settingsItem = NSMenuItem(title: "Settings\u{2026}", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
         if #available(macOS 14.0, *) { settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil) }
         menu.addItem(settingsItem)
         menu.addItem(NSMenuItem.separator())
         let quitItem = NSMenuItem(title: "Quit Voice", action: #selector(quitApp), keyEquivalent: "q")
+        quitItem.target = self
         menu.addItem(quitItem)
         statusItem.menu = menu
 
@@ -3663,7 +3666,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
     }
 
-    func makeWaveformImage() -> NSImage {
+    func makeWaveformImage(tint: NSColor? = nil) -> NSImage {
         let w: CGFloat = 18, h: CGFloat = 18
         let img = NSImage(size: NSSize(width: w, height: h))
         img.lockFocus()
@@ -3675,7 +3678,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         let centerY = h / 2.0
         let maxH = h * 0.7
         let heights: [CGFloat] = [0.25, 0.5, 0.75, 1.0, 0.75, 0.5, 0.25]
-        NSColor.black.setFill()
+        (tint ?? NSColor.black).setFill()
         for i in 0..<barCount {
             let bh = maxH * heights[i]
             let x = startX + CGFloat(i) * (barW + gap)
@@ -3684,7 +3687,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                          xRadius: barW / 2, yRadius: barW / 2).fill()
         }
         img.unlockFocus()
-        img.isTemplate = true
+        img.isTemplate = (tint == nil)
         return img
     }
 
@@ -3693,16 +3696,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         switch appState {
         case .idle:
             button.title = ""
+            button.contentTintColor = nil
             button.image = makeWaveformImage()
         case .recording:
-            button.image = nil
-            button.title = "\u{1F534}"  // red circle
+            button.title = ""
+            let micOrange = NSColor(red: 0.98, green: 0.68, blue: 0.08, alpha: 1.0)
+            button.image = makeWaveformImage(tint: micOrange)
         case .popo:
-            button.image = nil
-            button.title = "\u{1F535}"  // blue circle
+            button.title = ""
+            let micOrange = NSColor(red: 0.98, green: 0.68, blue: 0.08, alpha: 1.0)
+            button.image = makeWaveformImage(tint: micOrange)
         case .processing:
-            button.image = nil
-            button.title = "\u{23F3}"   // hourglass
+            button.title = ""
+            button.image = makeWaveformImage(tint: .secondaryLabelColor)
         }
     }
 
