@@ -171,11 +171,15 @@ if command -v create-dmg &>/dev/null; then
     fi
     create-dmg \
         --volname "Voice" \
+        --volicon "${SCRIPT_DIR}/Voice.icns" \
         "${DMG_BG_ARGS[@]}" \
+        --window-pos 200 120 \
         --window-size 660 400 \
-        --icon-size 100 \
-        --icon "Voice.app" 180 195 \
-        --app-drop-link 480 195 \
+        --icon-size 120 \
+        --text-size 12 \
+        --icon "Voice.app" 175 195 \
+        --hide-extension "Voice.app" \
+        --app-drop-link 485 195 \
         "${SCRIPT_DIR}/${DMG_NAME}" \
         "${STAGING}/"
 else
