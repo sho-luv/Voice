@@ -303,6 +303,23 @@ class Settings {
         set { defaults.set(newValue, forKey: "lastLicenseValidation") }
     }
 
+    func resetAll() {
+        // Reset user-facing settings to defaults (preserves license/trial data)
+        let keysToReset = [
+            "hotkeyIndex", "soundsEnabled", "autoStartOnLogin", "popoTimeout",
+            "clipboardRestore", "aiEnabled", "aiProvider",
+            "aiModelOllama", "aiModelOpenAI", "aiModelAnthropic",
+            "apiKeyOpenAI", "apiKeyAnthropic", "whisperModel",
+            "micDeviceUID", "overlayShowAppName", "overlayShowAppIcon",
+            "overlayShowWindowTitle", "overlayShowTimer",
+            "overlayEnabled", "overlayBackgroundOpacity", "overlayFontSize",
+            "overlaySensitivity", "saveTranscripts", "transcriptDirectory"
+        ]
+        for key in keysToReset {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
     func updateLaunchAgent(enabled: Bool) {
         let plistPath = NSHomeDirectory() + "/Library/LaunchAgents/com.faradaysoft.voice.plist"
         if enabled {
@@ -616,25 +633,25 @@ class InputMonitor {
                 return nil
             }
 
-            // Check for double-tap: if we had a recent short tap and this press
-            // comes within the window, it's a double-tap → POPO
+            // Check for double-tap: second press within window after a short tap
             if monitor.pendingRecordStart && (now - monitor.lastShortTapTime) < monitor.doubleTapWindow {
                 monitor.pendingRecordStart = false
                 monitor.doubleTapTimer?.cancel()
                 monitor.doubleTapTimer = nil
-                // Cancel any recording that may have started from the deferred timer
-                if monitor.isRecording {
-                    DispatchQueue.main.async { monitor.onCancel?() }
-                }
                 NSLog("Voice: double-tap detected → POPO mode")
                 DispatchQueue.main.async { monitor.onPopoStart?() }
                 return nil
             }
 
-            // Start push-to-talk recording (immediate — no delay)
-            if !monitor.isRecording {
-                DispatchQueue.main.async { monitor.onRecordStart?() }
+            // Don't start recording immediately — wait to see if this is a short tap
+            // Schedule deferred recording start after shortTapThreshold
+            let deferredStart = DispatchWorkItem { [weak monitor] in
+                guard let monitor = monitor, monitor.fnDown, !monitor.isRecording, !monitor.isPopo else { return }
+                monitor.onRecordStart?()
             }
+            monitor.doubleTapTimer?.cancel()
+            monitor.doubleTapTimer = deferredStart
+            DispatchQueue.main.asyncAfter(deadline: .now() + monitor.shortTapThreshold, execute: deferredStart)
             return nil  // swallow
 
         } else if !keyPressed && monitor.fnDown {
@@ -647,35 +664,31 @@ class InputMonitor {
                 return nil
             }
 
-            // Short tap — potential first tap of double-tap
-            if holdDuration < monitor.shortTapThreshold {
-                // Cancel the recording that started on key down
-                if monitor.isRecording {
-                    DispatchQueue.main.async { monitor.onCancel?() }
-                }
-                // Mark as pending double-tap
+            // Short tap — recording hasn't started yet (deferred start didn't fire)
+            if !monitor.isRecording {
+                // Cancel the deferred recording start
+                monitor.doubleTapTimer?.cancel()
+                monitor.doubleTapTimer = nil
+                // Mark as potential first tap of double-tap
                 monitor.lastShortTapTime = now
                 monitor.pendingRecordStart = true
 
-                // If no second tap arrives within the window, it was just a quick tap — ignore
+                // If no second tap arrives, it was just a quick tap — ignore
                 let timer = DispatchWorkItem { [weak monitor] in
                     guard let monitor = monitor else { return }
                     monitor.pendingRecordStart = false
                     monitor.doubleTapTimer = nil
                 }
-                monitor.doubleTapTimer?.cancel()
                 monitor.doubleTapTimer = timer
                 DispatchQueue.main.asyncAfter(deadline: .now() + monitor.doubleTapWindow, execute: timer)
                 return nil
             }
 
-            // Long hold release — normal push-to-talk stop
-            if monitor.isRecording {
-                if holdDuration < monitor.minHoldDuration {
-                    DispatchQueue.main.async { monitor.onCancel?() }
-                } else {
-                    DispatchQueue.main.async { monitor.onRecordStop?() }
-                }
+            // Recording is active (held past threshold) — stop it
+            if holdDuration < monitor.minHoldDuration {
+                DispatchQueue.main.async { monitor.onCancel?() }
+            } else {
+                DispatchQueue.main.async { monitor.onRecordStop?() }
             }
             return nil
         }
@@ -2349,7 +2362,7 @@ class SettingsWindowController {
     }
 }
 
-class SettingsViewController: NSViewController {
+class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
     private let openaiModels = ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "o4-mini"]
     private let anthropicModels = ["claude-sonnet-4-20250514", "claude-haiku-4-20250414", "claude-opus-4-20250514"]
 
@@ -2383,8 +2396,7 @@ class SettingsViewController: NSViewController {
     private var overlayBgSlider: NSSlider!
     private var overlayBgLabel: NSTextField!
     private var overlayTimerCheckbox: NSButton!
-    private var overlayFontSizeSlider: NSSlider!
-    private var overlayFontSizeLabel: NSTextField!
+    private var overlayFontSizeSegment: NSSegmentedControl!
     private var overlayPreview: OverlayPreviewView!
     private var sensitivitySlider: NSSlider!
     private var sensitivityLabel: NSTextField!
@@ -2395,9 +2407,10 @@ class SettingsViewController: NSViewController {
     private var downloadStatusLabel: NSTextField!
     private var saveTranscriptsCheckbox: NSButton!
     private var transcriptDirLabel: NSTextField!
-    private var searchField: NSTextField!
-    private var searchResultsView: NSScrollView!
-    private var searchResultsText: NSTextView!
+    private var transcriptSearchField: NSSearchField!
+    private var transcriptTableView: NSTableView!
+    private var transcriptResults: [(date: Date, text: String, path: String)] = []
+    private var transcriptCountLabel: NSTextField!
 
     // License tab controls
     private var licenseStatusLabel = NSTextField(labelWithString: "")
@@ -2495,6 +2508,14 @@ class SettingsViewController: NSViewController {
         clipboardCheckbox.state = Settings.shared.clipboardRestore ? .on : .off
         container.addSubview(clipboardCheckbox)
 
+        // Reset to defaults — bottom right
+        let resetBtn = NSButton(title: "Reset to Defaults", target: self, action: #selector(resetToDefaults))
+        resetBtn.frame = NSRect(x: 290, y: 12, width: 140, height: 24)
+        resetBtn.bezelStyle = .rounded
+        resetBtn.controlSize = .small
+        resetBtn.font = NSFont.systemFont(ofSize: 11)
+        container.addSubview(resetBtn)
+
         item.view = container
         return item
     }
@@ -2514,7 +2535,6 @@ class SettingsViewController: NSViewController {
         micPopup.target = self
         micPopup.action = #selector(micChanged)
         container.addSubview(micPopup)
-        refreshMicList()
 
         y -= 22
         micStatusLabel = NSTextField(labelWithString: "")
@@ -2522,6 +2542,8 @@ class SettingsViewController: NSViewController {
         micStatusLabel.font = NSFont.systemFont(ofSize: 10)
         micStatusLabel.textColor = .secondaryLabelColor
         container.addSubview(micStatusLabel)
+
+        refreshMicList()  // must be after micStatusLabel is created
 
         y -= 32
 
@@ -2562,14 +2584,14 @@ class SettingsViewController: NSViewController {
         y -= 24
 
         addLabel("Font size:", at: NSPoint(x: 40, y: y + 2), in: container)
-        overlayFontSizeSlider = NSSlider(value: Double(Settings.shared.overlayFontSize), minValue: 8, maxValue: 18, target: self, action: #selector(overlayFontSizeChanged))
-        overlayFontSizeSlider.frame = NSRect(x: 140, y: y, width: 120, height: 22)
-        container.addSubview(overlayFontSizeSlider)
-        overlayFontSizeLabel = NSTextField(labelWithString: "\(Int(Settings.shared.overlayFontSize))pt")
-        overlayFontSizeLabel.frame = NSRect(x: 265, y: y + 2, width: 40, height: 18)
-        overlayFontSizeLabel.font = NSFont.systemFont(ofSize: 11)
-        overlayFontSizeLabel.textColor = .secondaryLabelColor
-        container.addSubview(overlayFontSizeLabel)
+        overlayFontSizeSegment = NSSegmentedControl(labels: ["Small", "Medium", "Large"], trackingMode: .selectOne, target: self, action: #selector(overlayFontSizeChanged))
+        overlayFontSizeSegment.frame = NSRect(x: 140, y: y, width: 180, height: 22)
+        // Map current size to segment: Small=10, Medium=13, Large=16
+        let currentSize = Settings.shared.overlayFontSize
+        if currentSize <= 11 { overlayFontSizeSegment.selectedSegment = 0 }
+        else if currentSize <= 14 { overlayFontSizeSegment.selectedSegment = 1 }
+        else { overlayFontSizeSegment.selectedSegment = 2 }
+        container.addSubview(overlayFontSizeSegment)
         y -= 24
 
         addLabel("Sensitivity:", at: NSPoint(x: 40, y: y + 2), in: container)
@@ -2652,9 +2674,10 @@ class SettingsViewController: NSViewController {
     }
 
     @objc private func overlayFontSizeChanged() {
-        let size = CGFloat(Int(overlayFontSizeSlider.doubleValue))
+        let sizes: [CGFloat] = [10, 13, 16]  // Small, Medium, Large
+        let idx = overlayFontSizeSegment.selectedSegment
+        let size = sizes[idx]
         Settings.shared.overlayFontSize = size
-        overlayFontSizeLabel.stringValue = "\(Int(size))pt"
         overlayPreview.fontSize = size
         overlayPreview.resizeToFit()
     }
@@ -2755,115 +2778,199 @@ class SettingsViewController: NSViewController {
         item.label = "Transcription"
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 450, height: 350))
 
-        var y: CGFloat = 280
+        var y: CGFloat = 282
 
-        // Whisper model
-        addLabel("Whisper model:", at: NSPoint(x: 20, y: y), in: container)
-        whisperPopup = NSPopUpButton(frame: NSRect(x: 140, y: y - 2, width: 200, height: 26), pullsDown: false)
+        // Whisper model — compact row
+        addLabel("Model:", at: NSPoint(x: 20, y: y), in: container)
+        whisperPopup = NSPopUpButton(frame: NSRect(x: 75, y: y - 2, width: 200, height: 24), pullsDown: false)
         let models = ["large-v3-turbo-q5_0", "small.en", "medium.en", "large-v3"]
-        for m in models {
-            whisperPopup.addItem(withTitle: m)
-        }
+        for m in models { whisperPopup.addItem(withTitle: m) }
         whisperPopup.selectItem(withTitle: Settings.shared.whisperModel)
         whisperPopup.target = self
         whisperPopup.action = #selector(whisperModelChanged)
         container.addSubview(whisperPopup)
 
         downloadButton = NSButton(title: "Download", target: self, action: #selector(downloadModel))
-        downloadButton.frame = NSRect(x: 345, y: y - 2, width: 85, height: 26)
+        downloadButton.frame = NSRect(x: 280, y: y - 2, width: 75, height: 24)
         downloadButton.bezelStyle = .rounded
+        downloadButton.font = NSFont.systemFont(ofSize: 11)
         container.addSubview(downloadButton)
 
-        y -= 22
         downloadStatusLabel = NSTextField(labelWithString: "")
-        downloadStatusLabel.frame = NSRect(x: 140, y: y, width: 290, height: 16)
-        downloadStatusLabel.textColor = .secondaryLabelColor
-        downloadStatusLabel.font = NSFont.systemFont(ofSize: 10)
+        downloadStatusLabel.frame = NSRect(x: 358, y: y + 2, width: 72, height: 14)
+        downloadStatusLabel.textColor = .systemGreen
+        downloadStatusLabel.font = NSFont.systemFont(ofSize: 9)
         downloadStatusLabel.lineBreakMode = .byTruncatingTail
         container.addSubview(downloadStatusLabel)
-
         updateDownloadButton()
 
-        y -= 28
+        y -= 26
 
-        // Save transcripts
-        saveTranscriptsCheckbox = NSButton(checkboxWithTitle: "Save transcripts to:", target: self, action: #selector(saveTranscriptsChanged))
-        saveTranscriptsCheckbox.frame = NSRect(x: 20, y: y, width: 160, height: 22)
+        // Save transcripts — single compact row
+        saveTranscriptsCheckbox = NSButton(checkboxWithTitle: "Save transcripts", target: self, action: #selector(saveTranscriptsChanged))
+        saveTranscriptsCheckbox.frame = NSRect(x: 20, y: y, width: 130, height: 20)
+        saveTranscriptsCheckbox.font = NSFont.systemFont(ofSize: 11)
         saveTranscriptsCheckbox.state = Settings.shared.saveTranscripts ? .on : .off
         container.addSubview(saveTranscriptsCheckbox)
 
-        let dirButton = NSButton(title: "Choose...", target: self, action: #selector(chooseTranscriptDir))
-        dirButton.frame = NSRect(x: 345, y: y, width: 85, height: 22)
-        dirButton.bezelStyle = .rounded
-        dirButton.font = NSFont.systemFont(ofSize: 11)
-        container.addSubview(dirButton)
-
-        y -= 18
-        transcriptDirLabel = NSTextField(labelWithString: Settings.shared.transcriptDirectory)
-        transcriptDirLabel.frame = NSRect(x: 40, y: y, width: 390, height: 16)
-        transcriptDirLabel.font = NSFont.systemFont(ofSize: 10)
-        transcriptDirLabel.textColor = .secondaryLabelColor
-        transcriptDirLabel.lineBreakMode = .byTruncatingMiddle
+        transcriptDirLabel = NSTextField(labelWithString: "")
+        let dirPath = Settings.shared.transcriptDirectory
+        let shortPath = (dirPath as NSString).lastPathComponent
+        transcriptDirLabel.stringValue = "~/.../" + shortPath
+        transcriptDirLabel.frame = NSRect(x: 148, y: y + 2, width: 120, height: 14)
+        transcriptDirLabel.font = NSFont.systemFont(ofSize: 9)
+        transcriptDirLabel.textColor = .tertiaryLabelColor
+        transcriptDirLabel.lineBreakMode = .byTruncatingHead
         container.addSubview(transcriptDirLabel)
 
-        y -= 28
+        let dirButton = NSButton(title: "Change", target: self, action: #selector(chooseTranscriptDir))
+        dirButton.frame = NSRect(x: 280, y: y, width: 60, height: 20)
+        dirButton.bezelStyle = .rounded
+        dirButton.controlSize = .small
+        dirButton.font = NSFont.systemFont(ofSize: 10)
+        container.addSubview(dirButton)
 
-        let openButton = NSButton(title: "Open Folder", target: self, action: #selector(openTranscriptDir))
-        openButton.frame = NSRect(x: 20, y: y, width: 100, height: 22)
+        let openButton = NSButton(title: "Open", target: self, action: #selector(openTranscriptDir))
+        openButton.frame = NSRect(x: 344, y: y, width: 50, height: 20)
         openButton.bezelStyle = .rounded
-        openButton.font = NSFont.systemFont(ofSize: 11)
+        openButton.controlSize = .small
+        openButton.font = NSFont.systemFont(ofSize: 10)
         container.addSubview(openButton)
-
-        // Search
-        addLabel("Search:", at: NSPoint(x: 140, y: y + 2), in: container)
-        searchField = NSTextField(frame: NSRect(x: 195, y: y, width: 175, height: 22))
-        searchField.placeholderString = "search transcripts..."
-        searchField.font = NSFont.systemFont(ofSize: 11)
-        searchField.target = self
-        searchField.action = #selector(searchTranscripts)
-        container.addSubview(searchField)
-
-        let searchButton = NSButton(title: "Search", target: self, action: #selector(searchTranscripts))
-        searchButton.frame = NSRect(x: 375, y: y, width: 55, height: 22)
-        searchButton.bezelStyle = .rounded
-        searchButton.font = NSFont.systemFont(ofSize: 11)
-        container.addSubview(searchButton)
 
         y -= 24
 
-        // Results
-        searchResultsView = NSScrollView(frame: NSRect(x: 20, y: 10, width: 410, height: y - 10))
-        searchResultsView.hasVerticalScroller = true
-        searchResultsView.autohidesScrollers = true
-        searchResultsView.borderType = .bezelBorder
-        searchResultsText = NSTextView(frame: NSRect(x: 0, y: 0, width: 390, height: y - 10))
-        searchResultsText.isEditable = false
-        searchResultsText.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        searchResultsText.textColor = .labelColor
-        searchResultsText.backgroundColor = .textBackgroundColor
-        searchResultsView.documentView = searchResultsText
-        container.addSubview(searchResultsView)
+        // Search field — live filtering
+        transcriptSearchField = NSSearchField(frame: NSRect(x: 20, y: y, width: 350, height: 24))
+        transcriptSearchField.placeholderString = "Search transcripts..."
+        transcriptSearchField.font = NSFont.systemFont(ofSize: 12)
+        transcriptSearchField.delegate = self
+        transcriptSearchField.sendsSearchStringImmediately = true
+        transcriptSearchField.sendsWholeSearchString = false
+        container.addSubview(transcriptSearchField)
 
-        // Load recent transcripts
-        loadRecentTranscripts()
+        transcriptCountLabel = NSTextField(labelWithString: "")
+        transcriptCountLabel.frame = NSRect(x: 374, y: y + 4, width: 56, height: 14)
+        transcriptCountLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        transcriptCountLabel.textColor = .tertiaryLabelColor
+        transcriptCountLabel.alignment = .right
+        container.addSubview(transcriptCountLabel)
+
+        y -= 4
+
+        // Transcript list — single column, custom cell layout
+        let tableHeight = y - 6
+        let scrollView = NSScrollView(frame: NSRect(x: 20, y: 6, width: 410, height: tableHeight))
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .lineBorder
+        scrollView.drawsBackground = false
+
+        transcriptTableView = NSTableView()
+        transcriptTableView.dataSource = self
+        transcriptTableView.delegate = self
+        transcriptTableView.rowHeight = 48
+        transcriptTableView.usesAlternatingRowBackgroundColors = false
+        transcriptTableView.backgroundColor = .clear
+        transcriptTableView.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
+        transcriptTableView.headerView = nil
+        transcriptTableView.intercellSpacing = NSSize(width: 0, height: 1)
+        transcriptTableView.selectionHighlightStyle = .regular
+        transcriptTableView.gridStyleMask = .solidHorizontalGridLineMask
+        transcriptTableView.gridColor = NSColor.separatorColor.withAlphaComponent(0.3)
+
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("transcript"))
+        col.width = 406
+        transcriptTableView.addTableColumn(col)
+
+        // Double-click to copy
+        transcriptTableView.doubleAction = #selector(copyTranscriptRow)
+        transcriptTableView.target = self
+
+        scrollView.documentView = transcriptTableView
+        container.addSubview(scrollView)
+
+        reloadTranscripts()
 
         item.view = container
         return item
     }
 
-    private func loadRecentTranscripts() {
-        let results = Settings.shared.searchTranscripts(query: "")
-        let recent = results.prefix(20)
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd HH:mm"
-        var text = ""
-        for r in recent {
-            let dateStr = formatter.string(from: r.date)
-            let preview = r.text.replacingOccurrences(of: "\n", with: " ")
-            text += "[\(dateStr)] \(preview)\n\n"
+    // MARK: - Transcript Table Data
+
+    private func reloadTranscripts() {
+        let query = transcriptSearchField?.stringValue ?? ""
+        transcriptResults = Settings.shared.searchTranscripts(query: query)
+        transcriptTableView?.reloadData()
+        let count = transcriptResults.count
+        if count == 0 {
+            transcriptCountLabel?.stringValue = query.isEmpty ? "" : "No results"
+        } else {
+            transcriptCountLabel?.stringValue = "\(count)"
         }
-        if text.isEmpty { text = "No transcripts saved yet." }
-        searchResultsText?.string = text
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        return transcriptResults.count
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard row < transcriptResults.count else { return nil }
+        let record = transcriptResults[row]
+
+        // Custom cell: text on top (13pt), date below (10pt gray)
+        let cellView = NSView(frame: NSRect(x: 0, y: 0, width: 406, height: 48))
+
+        // Transcript text — primary content
+        let textLabel = NSTextField(labelWithString: "")
+        let preview = record.text.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
+        textLabel.stringValue = preview
+        textLabel.font = NSFont.systemFont(ofSize: 13)
+        textLabel.textColor = .labelColor
+        textLabel.lineBreakMode = .byTruncatingTail
+        textLabel.maximumNumberOfLines = 1
+        textLabel.frame = NSRect(x: 8, y: 22, width: 390, height: 20)
+        cellView.addSubview(textLabel)
+
+        // Date — secondary, below text
+        let dateLabel = NSTextField(labelWithString: "")
+        dateLabel.font = NSFont.systemFont(ofSize: 10)
+        dateLabel.textColor = .tertiaryLabelColor
+        dateLabel.lineBreakMode = .byClipping
+        dateLabel.frame = NSRect(x: 8, y: 5, width: 390, height: 14)
+
+        let formatter = DateFormatter()
+        let cal = Calendar.current
+        if cal.isDateInToday(record.date) {
+            formatter.dateFormat = "'Today at' h:mm a"
+        } else if cal.isDateInYesterday(record.date) {
+            formatter.dateFormat = "'Yesterday at' h:mm a"
+        } else {
+            formatter.dateFormat = "MMM d, yyyy 'at' h:mm a"
+        }
+        dateLabel.stringValue = formatter.string(from: record.date)
+        cellView.addSubview(dateLabel)
+
+        return cellView
+    }
+
+    // Live search — NSSearchFieldDelegate
+    func controlTextDidChange(_ obj: Notification) {
+        if let field = obj.object as? NSSearchField, field === transcriptSearchField {
+            reloadTranscripts()
+        }
+    }
+
+    @objc private func copyTranscriptRow() {
+        let row = transcriptTableView.clickedRow
+        guard row >= 0, row < transcriptResults.count else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(transcriptResults[row].text, forType: .string)
+        transcriptCountLabel?.stringValue = "Copied!"
+        transcriptCountLabel?.textColor = .systemGreen
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.transcriptCountLabel?.textColor = .tertiaryLabelColor
+            self?.reloadTranscripts()
+        }
     }
 
     @objc private func saveTranscriptsChanged() {
@@ -2889,21 +2996,6 @@ class SettingsViewController: NSViewController {
             try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
         }
         NSWorkspace.shared.open(URL(fileURLWithPath: dir))
-    }
-
-    @objc private func searchTranscripts() {
-        let query = searchField.stringValue
-        let results = Settings.shared.searchTranscripts(query: query)
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd HH:mm"
-        var text = ""
-        for r in results {
-            let dateStr = formatter.string(from: r.date)
-            let preview = r.text.replacingOccurrences(of: "\n", with: " ")
-            text += "[\(dateStr)] \(preview)\n\n"
-        }
-        if text.isEmpty { text = query.isEmpty ? "No transcripts saved yet." : "No results for \"\(query)\"" }
-        searchResultsText.string = text
     }
 
     // MARK: - License Tab
@@ -3149,6 +3241,41 @@ class SettingsViewController: NSViewController {
 
     @objc private func clipboardChanged() {
         Settings.shared.clipboardRestore = clipboardCheckbox.state == .on
+    }
+
+    @objc private func resetToDefaults() {
+        let alert = NSAlert()
+        alert.messageText = "Reset to Defaults?"
+        alert.informativeText = "This will reset all settings to their defaults. Your license and saved transcripts will not be affected."
+        alert.addButton(withTitle: "Reset")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        Settings.shared.resetAll()
+
+        // Refresh all visible controls
+        hotkeyPopup?.selectItem(at: 0)
+        soundsCheckbox?.state = .on
+        autoStartCheckbox?.state = .on
+        popoStepper?.integerValue = 5
+        popoLabel?.stringValue = "5"
+        clipboardCheckbox?.state = .on
+        overlayEnabledCheckbox?.state = .on
+        overlayAppNameCheckbox?.state = .on
+        overlayAppIconCheckbox?.state = .on
+        overlayBgSlider?.doubleValue = 0.6
+        overlayBgLabel?.stringValue = "60%"
+        overlayFontSizeSegment?.selectedSegment = 1  // Medium
+        sensitivitySlider?.doubleValue = 30
+        sensitivityLabel?.stringValue = "30x"
+        overlayPreview?.fontSize = 13
+        overlayPreview?.resizeToFit()
+        refreshMicList()
+
+        if let delegate = NSApp.delegate as? AppDelegate {
+            delegate.inputMonitor.reloadHotkey()
+        }
     }
 
     @objc private func aiEnabledChanged() {
@@ -3819,8 +3946,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         audioFileHandle = handle
         audioDataSize = 0
 
-        let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
+        var engine = AVAudioEngine()
+        var inputNode = engine.inputNode
 
         // Set selected microphone via CoreAudio (per D-05/D-07)
         let selectedUID = Settings.shared.micDeviceUID
@@ -3845,7 +3972,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             }
         }
 
-        let hwFormat = inputNode.outputFormat(forBus: 0)
+        var hwFormat = inputNode.outputFormat(forBus: 0)
+        NSLog("Voice: hwFormat — sampleRate=%.0f channels=%d", hwFormat.sampleRate, hwFormat.channelCount)
+
+        // If format is invalid (0 channels / 0 sample rate), the device selection failed silently.
+        // Reset to system default and retry with a fresh engine.
+        if hwFormat.channelCount == 0 || hwFormat.sampleRate == 0 {
+            NSLog("Voice: invalid hwFormat — resetting mic to system default")
+            Settings.shared.micDeviceUID = ""
+            engine = AVAudioEngine()
+            inputNode = engine.inputNode
+            hwFormat = inputNode.outputFormat(forBus: 0)
+            NSLog("Voice: retry hwFormat — sampleRate=%.0f channels=%d", hwFormat.sampleRate, hwFormat.channelCount)
+        }
+
+        guard hwFormat.channelCount > 0, hwFormat.sampleRate > 0 else {
+            appState = .idle
+            inputMonitor.setRecording(false)
+            updateIcon()
+            hideOverlay()
+            showNotification(title: "Voice", body: "No valid microphone found")
+            NSLog("Voice: FATAL — no valid audio format even with system default mic")
+            return
+        }
+
         guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true) else {
             appState = .idle
             inputMonitor.setRecording(false)
@@ -3860,7 +4010,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             inputMonitor.setRecording(false)
             updateIcon()
             hideOverlay()
-            showNotification(title: "Voice", body: "Failed to create audio converter")
+            showNotification(title: "Voice", body: "Failed to create audio converter (hw: \(hwFormat))")
+            NSLog("Voice: converter creation failed — hwFormat=%@", hwFormat.description)
             return
         }
 
@@ -4107,8 +4258,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         audioFileHandle = handle
         audioDataSize = 0
 
-        let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
+        var engine = AVAudioEngine()
+        var inputNode = engine.inputNode
 
         // Set selected microphone via CoreAudio (per D-05/D-07)
         let selectedUID = Settings.shared.micDeviceUID
@@ -4125,15 +4276,38 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                     UInt32(MemoryLayout<AudioDeviceID>.size)
                 )
                 if status != noErr {
-                    NSLog("Voice: Failed to set mic device %@ (status %d), using default", selectedUID, status)
+                    NSLog("Voice: POPO — Failed to set mic device %@ (status %d), using default", selectedUID, status)
                 }
             } else {
-                // Per D-07: selected mic disappeared, fall back to system default silently
-                NSLog("Voice: Preferred mic %@ not found, using system default", selectedUID)
+                NSLog("Voice: POPO — Preferred mic %@ not found, using system default", selectedUID)
             }
         }
 
-        let hwFormat = inputNode.outputFormat(forBus: 0)
+        var hwFormat = inputNode.outputFormat(forBus: 0)
+        NSLog("Voice: POPO hwFormat — sampleRate=%.0f channels=%d", hwFormat.sampleRate, hwFormat.channelCount)
+
+        // If format is invalid, reset to system default
+        if hwFormat.channelCount == 0 || hwFormat.sampleRate == 0 {
+            NSLog("Voice: POPO invalid hwFormat — resetting mic to system default")
+            Settings.shared.micDeviceUID = ""
+            engine = AVAudioEngine()
+            inputNode = engine.inputNode
+            hwFormat = inputNode.outputFormat(forBus: 0)
+            NSLog("Voice: POPO retry hwFormat — sampleRate=%.0f channels=%d", hwFormat.sampleRate, hwFormat.channelCount)
+        }
+
+        guard hwFormat.channelCount > 0, hwFormat.sampleRate > 0 else {
+            audioFileHandle?.closeFile()
+            audioFileHandle = nil
+            appState = .idle
+            inputMonitor.setRecording(false)
+            inputMonitor.setPopo(false)
+            updateIcon()
+            hideOverlay()
+            showNotification(title: "Voice", body: "No valid microphone found")
+            return
+        }
+
         guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true),
               let converter = AVAudioConverter(from: hwFormat, to: targetFormat) else {
             audioFileHandle?.closeFile()
@@ -4321,6 +4495,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             rawText = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
             let lines = rawText.components(separatedBy: .newlines).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
             rawText = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Fix common whisper punctuation issues: ensure space after . , ! ? : ;
+            rawText = rawText.replacingOccurrences(
+                of: "([.!?,;:])([A-Za-z])",
+                with: "$1 $2",
+                options: .regularExpression
+            )
 
             if rawText.isEmpty {
                 finishProcessing(error: "Empty transcription")
