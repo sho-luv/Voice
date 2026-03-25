@@ -27,7 +27,7 @@ if [[ -z "${VERSION}" ]]; then
     exit 1
 fi
 DMG_NAME="${APP_NAME}-${VERSION}.dmg"
-CERT="${VOICE_CODESIGN_IDENTITY:-Developer ID Application: Faraday Soft (MWW7M2563A)}"
+CERT="${VOICE_CODESIGN_IDENTITY:-Developer ID Application: Leon Johnson (MWW7M2563A)}"
 NOTARY_PROFILE="${VOICE_NOTARY_PROFILE:-voice-notarize}"
 
 find_dylib_source() {
