@@ -2940,12 +2940,13 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         // Buy button — solid blue
         let buyBtn = NSButton(title: "Buy Voice ($29)", target: self, action: #selector(openCheckout))
         buyBtn.frame = NSRect(x: 20, y: y, width: 410, height: 36)
-        buyBtn.bezelStyle = .rounded
+        buyBtn.bezelStyle = .regularSquare
         buyBtn.wantsLayer = true
         buyBtn.layer?.backgroundColor = NSColor.systemBlue.cgColor
         buyBtn.layer?.cornerRadius = 8
-        buyBtn.contentTintColor = .white
-        buyBtn.isBordered = false
+        buyBtn.layer?.masksToBounds = true
+        buyBtn.isBordered = true
+        buyBtn.isTransparent = false
         buyBtn.font = NSFont.boldSystemFont(ofSize: 14)
         let attrTitle = NSAttributedString(string: "Buy Voice ($29)", attributes: [
             .foregroundColor: NSColor.white,
