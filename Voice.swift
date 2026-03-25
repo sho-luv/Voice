@@ -277,6 +277,49 @@ class Settings {
         set { defaults.set(newValue, forKey: "onboardingComplete") }
     }
 
+    // Word Limit (freemium)
+    let freeWeeklyLimit = 2000
+
+    var wordsThisWeek: Int {
+        get { defaults.integer(forKey: "wordsThisWeek") }
+        set { defaults.set(newValue, forKey: "wordsThisWeek") }
+    }
+
+    var weekResetDate: Date? {
+        get { defaults.object(forKey: "weekResetDate") as? Date }
+        set { defaults.set(newValue, forKey: "weekResetDate") }
+    }
+
+    func addWords(_ count: Int) {
+        resetWeekIfNeeded()
+        wordsThisWeek += count
+    }
+
+    var wordsRemaining: Int {
+        if isLicensed { return Int.max }
+        resetWeekIfNeeded()
+        return max(0, freeWeeklyLimit - wordsThisWeek)
+    }
+
+    var isOverLimit: Bool {
+        if isLicensed { return false }
+        resetWeekIfNeeded()
+        return wordsThisWeek >= freeWeeklyLimit
+    }
+
+    private func resetWeekIfNeeded() {
+        let calendar = Calendar.current
+        if let resetDate = weekResetDate {
+            // Reset if we're in a different week (Monday-based)
+            if !calendar.isDate(resetDate, equalTo: Date(), toGranularity: .weekOfYear) {
+                wordsThisWeek = 0
+                weekResetDate = Date()
+            }
+        } else {
+            weekResetDate = Date()
+        }
+    }
+
     // Trial & License
     var trialStartDate: Date? {
         get { defaults.object(forKey: "trialStartDate") as? Date }
@@ -1568,8 +1611,8 @@ class AnthropicClient: AIClient {
 // MARK: - License Manager
 
 enum LicenseState {
-    case trial(daysLeft: Int)
-    case trialExpired
+    case free(wordsLeft: Int)
+    case limitReached
     case licensed
     case offlineGrace  // licensed but can't re-validate, working but warning
     case invalid
@@ -1578,22 +1621,13 @@ enum LicenseState {
 class LicenseManager {
     static let shared = LicenseManager()
 
-    // IMPORTANT: Replace these with actual values from LemonSqueezy dashboard
-    // User must retrieve from: LemonSqueezy Dashboard -> Products -> Voice
-    private let lsStoreId: Int = 0       // TODO: Set from LemonSqueezy dashboard
-    private let lsProductId: Int = 0     // TODO: Set from LemonSqueezy dashboard
-    let checkoutURL = "https://voice.lemonsqueezy.com/checkout"  // TODO: Set actual URL
+    private let lsProductId: Int = 912013
+    let checkoutURL = "https://faradaysoft.lemonsqueezy.com/checkout/buy/2617c440-f8d4-49c7-b6fd-4cbb15ed95fd"
 
-    private let trialDays = 14
     private let revalidationIntervalDays = 7
     private let offlineGraceDays = 3
 
-    private init() {
-        // Set trial start date on very first launch
-        if Settings.shared.trialStartDate == nil {
-            Settings.shared.trialStartDate = Date()
-        }
-    }
+    private init() {}
 
     // MARK: - State
 
@@ -1611,37 +1645,29 @@ class LicenseManager {
             return .licensed
         }
 
-        // Trial logic
-        guard let startDate = Settings.shared.trialStartDate else {
-            return .trial(daysLeft: trialDays)
+        // Free tier word limit
+        let remaining = Settings.shared.wordsRemaining
+        if remaining <= 0 {
+            return .limitReached
         }
-        let elapsed = Date().timeIntervalSince(startDate) / 86400
-        let daysLeft = trialDays - Int(elapsed)
-        if daysLeft > 0 {
-            return .trial(daysLeft: daysLeft)
-        } else {
-            return .trialExpired
-        }
+        return .free(wordsLeft: remaining)
     }
 
     var canRecord: Bool {
         switch currentState {
-        case .trial, .licensed, .offlineGrace:
+        case .free, .licensed, .offlineGrace:
             return true
-        case .trialExpired, .invalid:
+        case .limitReached, .invalid:
             return false
         }
     }
 
-    var trialDaysRemaining: Int? {
-        if case .trial(let days) = currentState { return days }
-        return nil
-    }
-
     var statusText: String {
         switch currentState {
-        case .trial(let days): return "Trial: \(days) day\(days == 1 ? "" : "s") left"
-        case .trialExpired: return "Trial expired"
+        case .free(let wordsLeft):
+            let used = Settings.shared.freeWeeklyLimit - wordsLeft
+            return "\(used) / \(Settings.shared.freeWeeklyLimit) words"
+        case .limitReached: return "Weekly limit reached"
         case .licensed: return "Licensed"
         case .offlineGrace: return "Licensed (offline)"
         case .invalid: return "License invalid"
@@ -1674,14 +1700,6 @@ class LicenseManager {
             let activated = json["activated"] as? Bool ?? false
             let instanceId = (json["instance"] as? [String: Any])?["id"] as? String
             let licenseStatus = (json["license_key"] as? [String: Any])?["status"] as? String
-
-            // Verify store_id matches (prevent cross-product key use)
-            let meta = json["meta"] as? [String: Any]
-            let storeId = meta?["store_id"] as? Int
-            if self.lsStoreId != 0 && storeId != self.lsStoreId {
-                DispatchQueue.main.async { completion(false, "Invalid license key for this product") }
-                return
-            }
 
             if activated, let instanceId = instanceId, licenseStatus == "active" {
                 Settings.shared.licenseKey = key
@@ -1773,20 +1791,31 @@ class LicenseExpiryWindowController {
         let contentView = NSView(frame: w.contentView!.bounds)
         contentView.autoresizingMask = [.width, .height]
 
-        // Title: "Your trial has ended" (per D-11)
-        let title = NSTextField(labelWithString: "Your trial has ended")
+        // Title
+        let title = NSTextField(labelWithString: "Weekly limit reached")
         title.font = .systemFont(ofSize: 20, weight: .bold)
         title.alignment = .center
         title.frame = NSRect(x: 40, y: 230, width: 340, height: 30)
         contentView.addSubview(title)
 
-        // Subtitle
-        let subtitle = NSTextField(wrappingLabelWithString: "Enter your license key to continue using Voice, or purchase a license.")
+        // Word count progress
+        let used = Settings.shared.wordsThisWeek
+        let limit = Settings.shared.freeWeeklyLimit
+        let subtitle = NSTextField(wrappingLabelWithString: "You've used \(used) of \(limit) free words this week.\nUpgrade for unlimited dictation, or wait until Monday.")
         subtitle.font = .systemFont(ofSize: 13)
         subtitle.textColor = .secondaryLabelColor
         subtitle.alignment = .center
-        subtitle.frame = NSRect(x: 40, y: 190, width: 340, height: 40)
+        subtitle.frame = NSRect(x: 40, y: 180, width: 340, height: 50)
         contentView.addSubview(subtitle)
+
+        // Progress bar
+        let progressBar = NSProgressIndicator(frame: NSRect(x: 60, y: 170, width: 300, height: 6))
+        progressBar.style = .bar
+        progressBar.minValue = 0
+        progressBar.maxValue = Double(limit)
+        progressBar.doubleValue = min(Double(used), Double(limit))
+        progressBar.isIndeterminate = false
+        contentView.addSubview(progressBar)
 
         // License key field (per D-12)
         let keyField = NSTextField(frame: NSRect(x: 60, y: 150, width: 300, height: 28))
@@ -1808,18 +1837,18 @@ class LicenseExpiryWindowController {
         activateBtn.keyEquivalent = "\r"  // Enter key
         contentView.addSubview(activateBtn)
 
-        // Buy button (per D-13): opens LemonSqueezy checkout
-        let buyBtn = NSButton(title: "Buy Voice ($29)", target: nil, action: nil)
-        buyBtn.frame = NSRect(x: 130, y: 45, width: 160, height: 32)
+        // Upgrade button: opens LemonSqueezy checkout
+        let buyBtn = NSButton(title: "Upgrade — $5/mo or $39/yr", target: nil, action: nil)
+        buyBtn.frame = NSRect(x: 100, y: 45, width: 220, height: 32)
         buyBtn.bezelStyle = .rounded
         buyBtn.contentTintColor = .controlAccentColor
         contentView.addSubview(buyBtn)
 
-        // Quit button
-        let quitBtn = NSButton(title: "Quit", target: NSApp, action: #selector(NSApplication.terminate(_:)))
-        quitBtn.frame = NSRect(x: 20, y: 15, width: 80, height: 28)
-        quitBtn.bezelStyle = .rounded
-        contentView.addSubview(quitBtn)
+        // OK button — dismiss (app still works, just can't transcribe more this week)
+        let okBtn = NSButton(title: "OK", target: nil, action: nil)
+        okBtn.frame = NSRect(x: 20, y: 15, width: 80, height: 28)
+        okBtn.bezelStyle = .rounded
+        contentView.addSubview(okBtn)
 
         // Wire activate action using a helper class to capture references
         class ActivateHandler: NSObject {
@@ -1869,6 +1898,17 @@ class LicenseExpiryWindowController {
         objc_setAssociatedObject(w, "buyHandler", buyHandler, .OBJC_ASSOCIATION_RETAIN)
         buyBtn.target = buyHandler
         buyBtn.action = #selector(BuyHandler.buy)
+
+        // Wire OK button to dismiss
+        class OKHandler: NSObject {
+            weak var window: NSWindow?
+            init(window: NSWindow?) { self.window = window }
+            @objc func dismiss() { window?.close() }
+        }
+        let okHandler = OKHandler(window: w)
+        objc_setAssociatedObject(w, "okHandler", okHandler, .OBJC_ASSOCIATION_RETAIN)
+        okBtn.target = okHandler
+        okBtn.action = #selector(OKHandler.dismiss)
 
         w.contentView = contentView
         w.makeKeyAndOrderFront(nil)
@@ -3080,8 +3120,8 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         switch state {
         case .licensed: licenseStatusLabel.textColor = .systemGreen
         case .offlineGrace: licenseStatusLabel.textColor = .systemYellow
-        case .trial: licenseStatusLabel.textColor = .controlAccentColor
-        case .trialExpired, .invalid: licenseStatusLabel.textColor = .systemRed
+        case .free: licenseStatusLabel.textColor = .controlAccentColor
+        case .limitReached, .invalid: licenseStatusLabel.textColor = .systemRed
         }
     }
 
@@ -3758,6 +3798,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 _ = self?.inputMonitor.start()
             }
         }
+
+        // License validation for existing subscribers
+        LicenseManager.shared.validateIfNeeded()
 
         // Preflight checks
         if !FileManager.default.fileExists(atPath: Settings.shared.whisperModelPath) {
@@ -4505,6 +4548,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
             if rawText.isEmpty {
                 finishProcessing(error: "Empty transcription")
+                cleanup(audioFile)
+                return
+            }
+
+            // Count words and check free tier limit
+            let wordCount = rawText.split(separator: " ").count
+            Settings.shared.addWords(wordCount)
+            if Settings.shared.isOverLimit && !Settings.shared.isLicensed {
+                DispatchQueue.main.async {
+                    LicenseExpiryWindowController.shared.show()
+                }
+                finishProcessing(error: "Weekly limit reached")
                 cleanup(audioFile)
                 return
             }
