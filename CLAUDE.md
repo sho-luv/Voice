@@ -3,7 +3,7 @@
 
 **Voice**
 
-Voice is a privacy-first macOS speech-to-text app by Faraday Soft (Enfrosec LLC). Press fn, talk, release — transcribed text is pasted into whatever app you're using. All processing happens locally using whisper.cpp. No cloud, no data collection, no accounts. Sold as a one-time $29 purchase via LemonSqueezy.
+Voice is a privacy-first macOS speech-to-text app by Faraday Soft (Enfrosec LLC). Press fn, talk, release — transcribed text is pasted into whatever app you're using. Audio transcription and cleanup happen locally using whisper.cpp and Ollama. No cloud transcription, no remote AI providers, no accounts. Sold as a one-time $29 purchase via LemonSqueezy.
 
 **Core Value:** Local-only, instant dictation that works everywhere on macOS — press a key, speak, text appears. Privacy is non-negotiable.
 
@@ -11,7 +11,7 @@ Voice is a privacy-first macOS speech-to-text app by Faraday Soft (Enfrosec LLC)
 
 - **No Xcode**: Build with swiftc directly — keeps it simple, no project file complexity
 - **Single file**: Voice.swift monolith — may need to split if it grows past ~3000 lines
-- **Privacy**: Zero network requests unless user explicitly enables AI cleanup
+- **Privacy**: Audio and transcripts stay local; network access is limited to LemonSqueezy license flows and optional localhost Ollama calls
 - **Self-contained**: App bundle must include everything (whisper-cli, dylibs, model) — no homebrew dependencies at runtime
 - **macOS only**: Target macOS 13+ (Ventura and later)
 - **Accessibility permission**: Required for global hotkey — UX must handle permission flow gracefully
@@ -51,9 +51,7 @@ Voice is a privacy-first macOS speech-to-text app by Faraday Soft (Enfrosec LLC)
 - `popoTimeout` - POPO mode timeout (1-30 minutes)
 - `clipboardRestore` - Restore clipboard after paste
 - `aiEnabled` - Enable/disable AI text cleanup
-- `aiProvider` - Ollama, OpenAI, or Anthropic
-- `aiModelOllama` / `aiModelOpenAI` / `aiModelAnthropic` - Model per provider
-- `apiKeyOpenAI` / `apiKeyAnthropic` - API keys stored in UserDefaults (not Keychain)
+- `aiModelOllama` - Ollama model used for local text cleanup
 - `whisperModel` - Whisper model variant name
 - `Info.plist` - App metadata, version (`3.2`), bundle ID, microphone usage description
 - `Voice.entitlements` - Audio input, Apple Events automation, disable library validation, allow unsigned executable memory, allow dyld env vars
@@ -95,7 +93,7 @@ Voice is a privacy-first macOS speech-to-text app by Faraday Soft (Enfrosec LLC)
 - `install.sh`, `create-dmg.sh` -- build/distribution scripts (lowercase, hyphenated)
 - PascalCase: `AppDelegate`, `InputMonitor`, `OverlayWindow`, `TextInjector`, `OllamaClient`
 - Singletons use `static let shared`: `Settings.shared`, `SettingsWindowController.shared`
-- PascalCase type names: `AppState`, `AIProvider`, `OverlayState`
+- PascalCase type names: `AppState`, `OverlayState`
 - camelCase cases: `.idle`, `.recording`, `.popo`, `.processing`
 - Associated values for data-carrying cases: `.done(String)`, `.error(String)`
 - camelCase: `startRecording()`, `stopPopo()`, `transcribeAndProcess()`
@@ -105,7 +103,7 @@ Voice is a privacy-first macOS speech-to-text app by Faraday Soft (Enfrosec LLC)
 - camelCase: `recProcess`, `audioFile`, `previousApp`, `statusItem`
 - Private state uses simple names: `fnDown`, `fnDownTime`, `isRecording`, `isPopo`, `spaceHeld`
 - Constants as `let` properties: `baseURL`, `recPath`, `afplayPath`, `minHoldDuration`
-- camelCase strings matching property names: `"hotkeyIndex"`, `"soundsEnabled"`, `"aiProvider"`, `"apiKeyOpenAI"`
+- camelCase strings matching property names: `"hotkeyIndex"`, `"soundsEnabled"`, `"aiModelOllama"`
 ## Code Style
 - No external formatter (no .prettierrc, .swiftformat, .swiftlint)
 - 4-space indentation throughout
@@ -173,8 +171,8 @@ Voice is a privacy-first macOS speech-to-text app by Faraday Soft (Enfrosec LLC)
 - Used by: `stopRecording()` and `stopPopo()` dispatch to this on a background queue
 - Purpose: Cleans up raw transcription using LLM (remove filler words, fix grammar)
 - Location: `Voice.swift` lines 264-1048
-- Contains: `AIClient` protocol (line 266), `OllamaClient` (lines 766-864), `OpenAIClient` (lines 868-951), `AnthropicClient` (lines 955-1048)
-- Depends on: External API services or local Ollama server
+- Contains: `OllamaClient` local cleanup implementation
+- Depends on: Local Ollama server
 - Used by: `transcribeAndProcess()` after whisper output
 - Purpose: Inserts transcribed text into the active application
 - Location: `Voice.swift` lines 568-761 (`TextInjector` class, `DelayedClipboardProvider` class)
@@ -197,10 +195,10 @@ Voice is a privacy-first macOS speech-to-text app by Faraday Soft (Enfrosec LLC)
 - `InputMonitor` tracks its own `fnDown`, `isRecording`, `isPopo`, `spaceHeld` booleans
 - State transitions are imperative (no reactive/binding framework)
 ## Key Abstractions
-- Purpose: Polymorphic AI text cleanup -- swap providers without changing caller
-- Definition: `Voice.swift` line 266
-- Implementations: `OllamaClient` (line 766), `OpenAIClient` (line 868), `AnthropicClient` (line 955)
-- Pattern: Strategy pattern. Provider selected at runtime based on `Settings.shared.aiProvider`
+- Purpose: Local text cleanup and model health checks
+- Definition: `Voice.swift`
+- Implementation: `OllamaClient`
+- Pattern: Single local cleanup path with graceful fallback
 - Purpose: Captures the active app/window/field context for AI tone guidance
 - Definition: `Voice.swift` lines 191-246
 - Pattern: Uses macOS Accessibility API (`AXUIElementCreateSystemWide`) to detect active app name, window title, and focused field role
@@ -208,7 +206,7 @@ Voice is a privacy-first macOS speech-to-text app by Faraday Soft (Enfrosec LLC)
 - Purpose: Centralized configuration with UserDefaults persistence
 - Definition: `Voice.swift` lines 39-187
 - Pattern: Singleton (`Settings.shared`) with computed properties wrapping UserDefaults
-- Notable: `aiModel` and `apiKey` properties are provider-aware -- they read/write different UserDefaults keys depending on `aiProvider`
+- Notable: `aiModel` wraps the persisted `aiModelOllama` setting
 - Purpose: Lazy clipboard rendering to avoid clipboard conflicts
 - Definition: `Voice.swift` lines 573-592
 - Pattern: Implements `NSPasteboardItemDataProvider` -- text is provided on-demand when the target app reads the clipboard after Cmd+V
@@ -226,7 +224,7 @@ Voice is a privacy-first macOS speech-to-text app by Faraday Soft (Enfrosec LLC)
 ## Error Handling
 - Recording failures: catch Process launch errors, reset to `.idle`, show notification via `UNUserNotificationCenter`
 - Transcription failures: check file size (> 1000 bytes), check non-empty output, fallback to raw text if AI cleanup fails
-- AI client failures: all three clients return the original (uncleaned) text on any error -- never blocks the pipeline
+- Ollama cleanup failures return the original (uncleaned) text on any error -- never block the pipeline
 - Accessibility permission: on event tap creation failure, shows notification and opens System Settings to Accessibility pane
 - Empty/short recordings: dedicated error paths with overlay feedback ("Recording too short", "Empty transcription")
 ## Cross-Cutting Concerns

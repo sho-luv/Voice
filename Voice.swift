@@ -3,6 +3,7 @@ import ApplicationServices
 import UserNotifications
 import AVFoundation
 import CoreAudio
+import Security
 
 // MARK: - App State
 
@@ -11,14 +12,6 @@ enum AppState {
     case recording
     case popo          // POPO lock mode (continuous until fn tap)
     case processing
-}
-
-// MARK: - AI Provider
-
-enum AIProvider: String, CaseIterable {
-    case ollama = "Ollama (local)"
-    case openai = "OpenAI"
-    case anthropic = "Anthropic"
 }
 
 // MARK: - Hotkey Option
@@ -36,12 +29,94 @@ let hotkeyOptions: [HotkeyOption] = [
     HotkeyOption(name: "Right Cmd", keyCode: 54, flagMask: .maskCommand),
 ]
 
+// MARK: - Keychain
+
+enum KeychainStore {
+    static let service = "com.faradaysoft.voice"
+
+    static func string(for account: String) -> String {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account,
+            kSecMatchLimit: kSecMatchLimitOne,
+            kSecReturnData: true,
+        ]
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        switch status {
+        case errSecSuccess:
+            guard let data = item as? Data,
+                  let value = String(data: data, encoding: .utf8) else {
+                return ""
+            }
+            return value
+        case errSecItemNotFound:
+            return ""
+        default:
+            NSLog("Voice: keychain read failed for %@ (%d)", account, status)
+            return ""
+        }
+    }
+
+    @discardableResult
+    static func set(_ value: String, for account: String) -> Bool {
+        if value.isEmpty {
+            return delete(account)
+        }
+
+        let data = Data(value.utf8)
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account,
+        ]
+        let attributes: [CFString: Any] = [kSecValueData: data]
+
+        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if updateStatus == errSecSuccess {
+            return true
+        }
+        if updateStatus != errSecItemNotFound {
+            NSLog("Voice: keychain update failed for %@ (%d)", account, updateStatus)
+            return false
+        }
+
+        var addQuery = query
+        addQuery[kSecValueData] = data
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        if addStatus != errSecSuccess {
+            NSLog("Voice: keychain add failed for %@ (%d)", account, addStatus)
+            return false
+        }
+        return true
+    }
+
+    @discardableResult
+    static func delete(_ account: String) -> Bool {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account,
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        if status == errSecSuccess || status == errSecItemNotFound {
+            return true
+        }
+        NSLog("Voice: keychain delete failed for %@ (%d)", account, status)
+        return false
+    }
+}
+
 // MARK: - Settings
 
 class Settings {
     static let shared = Settings()
 
     private let defaults = UserDefaults.standard
+    private let licenseKeyAccount = "license-key"
+    private let licenseInstanceIdAccount = "license-instance-id"
 
     private init() {
         defaults.register(defaults: [
@@ -51,12 +126,7 @@ class Settings {
             "popoTimeout": 5,
             "clipboardRestore": true,
             "aiEnabled": true,
-            "aiProvider": AIProvider.ollama.rawValue,
             "aiModelOllama": "llama3.2:3b",
-            "aiModelOpenAI": "gpt-4o-mini",
-            "aiModelAnthropic": "claude-sonnet-4-20250514",
-            "apiKeyOpenAI": "",
-            "apiKeyAnthropic": "",
             "whisperModel": "large-v3-turbo-q5_0",
             "micDeviceUID": "",
             "overlayShowAppName": true,
@@ -64,6 +134,8 @@ class Settings {
             "overlayShowWindowTitle": false,
             "overlayShowTimer": true,
         ])
+        migrateLegacyAISettings()
+        migrateLegacyLicenseStorage()
     }
 
     var hotkeyIndex: Int {
@@ -113,43 +185,9 @@ class Settings {
         set { defaults.set(newValue, forKey: "aiEnabled") }
     }
 
-    var aiProvider: AIProvider {
-        get { AIProvider(rawValue: defaults.string(forKey: "aiProvider") ?? "") ?? .ollama }
-        set { defaults.set(newValue.rawValue, forKey: "aiProvider") }
-    }
-
     var aiModel: String {
-        get {
-            switch aiProvider {
-            case .ollama:    return defaults.string(forKey: "aiModelOllama") ?? "llama3.2:3b"
-            case .openai:    return defaults.string(forKey: "aiModelOpenAI") ?? "gpt-4o-mini"
-            case .anthropic: return defaults.string(forKey: "aiModelAnthropic") ?? "claude-sonnet-4-20250514"
-            }
-        }
-        set {
-            switch aiProvider {
-            case .ollama:    defaults.set(newValue, forKey: "aiModelOllama")
-            case .openai:    defaults.set(newValue, forKey: "aiModelOpenAI")
-            case .anthropic: defaults.set(newValue, forKey: "aiModelAnthropic")
-            }
-        }
-    }
-
-    var apiKey: String {
-        get {
-            switch aiProvider {
-            case .ollama:    return ""
-            case .openai:    return defaults.string(forKey: "apiKeyOpenAI") ?? ""
-            case .anthropic: return defaults.string(forKey: "apiKeyAnthropic") ?? ""
-            }
-        }
-        set {
-            switch aiProvider {
-            case .ollama:    break
-            case .openai:    defaults.set(newValue, forKey: "apiKeyOpenAI")
-            case .anthropic: defaults.set(newValue, forKey: "apiKeyAnthropic")
-            }
-        }
+        get { defaults.string(forKey: "aiModelOllama") ?? "llama3.2:3b" }
+        set { defaults.set(newValue, forKey: "aiModelOllama") }
     }
 
     var whisperModel: String {
@@ -296,13 +334,11 @@ class Settings {
     }
 
     var wordsRemaining: Int {
-        if isLicensed { return Int.max }
         resetWeekIfNeeded()
         return max(0, freeWeeklyLimit - wordsThisWeek)
     }
 
     var isOverLimit: Bool {
-        if isLicensed { return false }
         resetWeekIfNeeded()
         return wordsThisWeek >= freeWeeklyLimit
     }
@@ -327,18 +363,17 @@ class Settings {
     }
 
     var licenseKey: String {
-        get { defaults.string(forKey: "licenseKey") ?? "" }
-        set { defaults.set(newValue, forKey: "licenseKey") }
+        get { KeychainStore.string(for: licenseKeyAccount) }
+        set { _ = KeychainStore.set(newValue, for: licenseKeyAccount) }
     }
 
     var licenseInstanceId: String {
-        get { defaults.string(forKey: "licenseInstanceId") ?? "" }
-        set { defaults.set(newValue, forKey: "licenseInstanceId") }
+        get { KeychainStore.string(for: licenseInstanceIdAccount) }
+        set { _ = KeychainStore.set(newValue, for: licenseInstanceIdAccount) }
     }
 
-    var isLicensed: Bool {
-        get { defaults.bool(forKey: "isLicensed") }
-        set { defaults.set(newValue, forKey: "isLicensed") }
+    var hasStoredLicenseCredentials: Bool {
+        !licenseKey.isEmpty && !licenseInstanceId.isEmpty
     }
 
     var lastLicenseValidation: Date? {
@@ -350,9 +385,7 @@ class Settings {
         // Reset user-facing settings to defaults (preserves license/trial data)
         let keysToReset = [
             "hotkeyIndex", "soundsEnabled", "autoStartOnLogin", "popoTimeout",
-            "clipboardRestore", "aiEnabled", "aiProvider",
-            "aiModelOllama", "aiModelOpenAI", "aiModelAnthropic",
-            "apiKeyOpenAI", "apiKeyAnthropic", "whisperModel",
+            "clipboardRestore", "aiEnabled", "aiModelOllama", "whisperModel",
             "micDeviceUID", "overlayShowAppName", "overlayShowAppIcon",
             "overlayShowWindowTitle", "overlayShowTimer",
             "overlayEnabled", "overlayBackgroundOpacity", "overlayFontSize",
@@ -361,6 +394,39 @@ class Settings {
         for key in keysToReset {
             defaults.removeObject(forKey: key)
         }
+        defaults.removeObject(forKey: "aiProvider")
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix("apiKey") {
+            defaults.removeObject(forKey: key)
+        }
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix("aiModel") && key != "aiModelOllama" {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    private func migrateLegacyAISettings() {
+        defaults.removeObject(forKey: "aiProvider")
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix("apiKey") {
+            defaults.removeObject(forKey: key)
+        }
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix("aiModel") && key != "aiModelOllama" {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    private func migrateLegacyLicenseStorage() {
+        let legacyKey = defaults.string(forKey: "licenseKey") ?? ""
+        let legacyInstanceId = defaults.string(forKey: "licenseInstanceId") ?? ""
+
+        if licenseKey.isEmpty && !legacyKey.isEmpty {
+            licenseKey = legacyKey
+        }
+        if licenseInstanceId.isEmpty && !legacyInstanceId.isEmpty {
+            licenseInstanceId = legacyInstanceId
+        }
+
+        defaults.removeObject(forKey: "licenseKey")
+        defaults.removeObject(forKey: "licenseInstanceId")
+        defaults.removeObject(forKey: "isLicensed")
     }
 
     func updateLaunchAgent(enabled: Bool) {
@@ -534,13 +600,6 @@ func cleanupSystemPrompt(appContext: AppContext) -> String {
     7. Output ONLY the cleaned text. No commentary.
     Context: Writing in \(appContext.appName). \(appContext.toneGuidance)
     """
-}
-
-// MARK: - AIClient Protocol
-
-protocol AIClient {
-    func cleanupText(_ text: String, appContext: AppContext, completion: @escaping (String) -> Void)
-    func testConnection(completion: @escaping (Bool, String) -> Void)
 }
 
 // MARK: - Input Monitor (CGEventTap for fn key)
@@ -1324,7 +1383,7 @@ class TextInjector {
 
 // MARK: - Ollama Client
 
-class OllamaClient: AIClient {
+class OllamaClient {
     let baseURL = "http://localhost:11434"
     private var isAvailable = false
 
@@ -1424,190 +1483,6 @@ class OllamaClient: AIClient {
     }
 }
 
-// MARK: - OpenAI Client
-
-class OpenAIClient: AIClient {
-    func cleanupText(_ text: String, appContext: AppContext, completion: @escaping (String) -> Void) {
-        let apiKey = Settings.shared.apiKey
-        guard !apiKey.isEmpty else {
-            completion(text)
-            return
-        }
-
-        let truncated = String(text.prefix(4000))
-        let systemPrompt = cleanupSystemPrompt(appContext: appContext)
-
-        guard let url = URL(string: "https://api.openai.com/v1/chat/completions") else {
-            completion(text)
-            return
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 30
-
-        let body: [String: Any] = [
-            "model": Settings.shared.aiModel,
-            "messages": [
-                ["role": "system", "content": systemPrompt],
-                ["role": "user", "content": truncated]
-            ],
-            "temperature": 0.1,
-            "max_tokens": 2048
-        ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            guard error == nil,
-                  let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let choices = json["choices"] as? [[String: Any]],
-                  let first = choices.first,
-                  let message = first["message"] as? [String: Any],
-                  let content = message["content"] as? String else {
-                completion(text)
-                return
-            }
-            let cleaned = content.trimmingCharacters(in: .whitespacesAndNewlines)
-            completion(cleaned.isEmpty ? text : cleaned)
-        }.resume()
-    }
-
-    func testConnection(completion: @escaping (Bool, String) -> Void) {
-        let apiKey = Settings.shared.apiKey
-        guard !apiKey.isEmpty else {
-            completion(false, "No API key set")
-            return
-        }
-
-        guard let url = URL(string: "https://api.openai.com/v1/models") else {
-            completion(false, "Invalid URL")
-            return
-        }
-
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 10
-
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error = error {
-                completion(false, "Error: \(error.localizedDescription)")
-                return
-            }
-            guard let httpResponse = response as? HTTPURLResponse else {
-                completion(false, "No response")
-                return
-            }
-            if httpResponse.statusCode == 200 {
-                completion(true, "Connected to OpenAI, model: \(Settings.shared.aiModel)")
-            } else if httpResponse.statusCode == 401 {
-                completion(false, "Invalid API key")
-            } else {
-                completion(false, "HTTP \(httpResponse.statusCode)")
-            }
-        }.resume()
-    }
-}
-
-// MARK: - Anthropic Client
-
-class AnthropicClient: AIClient {
-    func cleanupText(_ text: String, appContext: AppContext, completion: @escaping (String) -> Void) {
-        let apiKey = Settings.shared.apiKey
-        guard !apiKey.isEmpty else {
-            completion(text)
-            return
-        }
-
-        let truncated = String(text.prefix(4000))
-        let systemPrompt = cleanupSystemPrompt(appContext: appContext)
-
-        guard let url = URL(string: "https://api.anthropic.com/v1/messages") else {
-            completion(text)
-            return
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        request.timeoutInterval = 30
-
-        let body: [String: Any] = [
-            "model": Settings.shared.aiModel,
-            "system": systemPrompt,
-            "messages": [
-                ["role": "user", "content": truncated]
-            ],
-            "temperature": 0.1,
-            "max_tokens": 2048
-        ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            guard error == nil,
-                  let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let content = json["content"] as? [[String: Any]],
-                  let first = content.first,
-                  let responseText = first["text"] as? String else {
-                completion(text)
-                return
-            }
-            let cleaned = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
-            completion(cleaned.isEmpty ? text : cleaned)
-        }.resume()
-    }
-
-    func testConnection(completion: @escaping (Bool, String) -> Void) {
-        let apiKey = Settings.shared.apiKey
-        guard !apiKey.isEmpty else {
-            completion(false, "No API key set")
-            return
-        }
-
-        guard let url = URL(string: "https://api.anthropic.com/v1/messages") else {
-            completion(false, "Invalid URL")
-            return
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        request.timeoutInterval = 10
-
-        let body: [String: Any] = [
-            "model": Settings.shared.aiModel,
-            "messages": [["role": "user", "content": "Hi"]],
-            "max_tokens": 1
-        ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error = error {
-                completion(false, "Error: \(error.localizedDescription)")
-                return
-            }
-            guard let httpResponse = response as? HTTPURLResponse else {
-                completion(false, "No response")
-                return
-            }
-            if httpResponse.statusCode == 200 {
-                completion(true, "Connected to Anthropic, model: \(Settings.shared.aiModel)")
-            } else if httpResponse.statusCode == 401 {
-                completion(false, "Invalid API key")
-            } else {
-                completion(false, "HTTP \(httpResponse.statusCode)")
-            }
-        }.resume()
-    }
-}
-
 // MARK: - License Manager
 
 enum LicenseState {
@@ -1629,18 +1504,23 @@ class LicenseManager {
 
     private init() {}
 
+    private var hasStoredLicenseCredentials: Bool {
+        Settings.shared.hasStoredLicenseCredentials
+    }
+
     // MARK: - State
 
     var currentState: LicenseState {
         // If licensed, check revalidation
-        if Settings.shared.isLicensed && !Settings.shared.licenseKey.isEmpty {
-            if let lastCheck = Settings.shared.lastLicenseValidation {
-                let daysSince = Date().timeIntervalSince(lastCheck) / 86400
-                if daysSince > Double(revalidationIntervalDays + offlineGraceDays) {
-                    return .invalid  // too long without validation
-                } else if daysSince > Double(revalidationIntervalDays) {
-                    return .offlineGrace
-                }
+        if hasStoredLicenseCredentials {
+            guard let lastCheck = Settings.shared.lastLicenseValidation else {
+                return .offlineGrace
+            }
+            let daysSince = Date().timeIntervalSince(lastCheck) / 86400
+            if daysSince > Double(revalidationIntervalDays + offlineGraceDays) {
+                return .invalid  // too long without validation
+            } else if daysSince > Double(revalidationIntervalDays) {
+                return .offlineGrace
             }
             return .licensed
         }
@@ -1704,7 +1584,6 @@ class LicenseManager {
             if activated, let instanceId = instanceId, licenseStatus == "active" {
                 Settings.shared.licenseKey = key
                 Settings.shared.licenseInstanceId = instanceId
-                Settings.shared.isLicensed = true
                 Settings.shared.lastLicenseValidation = Date()
                 DispatchQueue.main.async { completion(true, "License activated!") }
             } else {
@@ -1717,7 +1596,7 @@ class LicenseManager {
     // MARK: - Validation
 
     func validateIfNeeded() {
-        guard Settings.shared.isLicensed, !Settings.shared.licenseKey.isEmpty else { return }
+        guard hasStoredLicenseCredentials else { return }
         guard let lastCheck = Settings.shared.lastLicenseValidation else {
             validateOnline()
             return
@@ -1749,7 +1628,7 @@ class LicenseManager {
                 Settings.shared.lastLicenseValidation = Date()
             } else {
                 // License revoked or invalid — clear licensed state
-                Settings.shared.isLicensed = false
+                self.deactivate()
             }
         }.resume()
     }
@@ -1759,7 +1638,6 @@ class LicenseManager {
     func deactivate() {
         Settings.shared.licenseKey = ""
         Settings.shared.licenseInstanceId = ""
-        Settings.shared.isLicensed = false
         Settings.shared.lastLicenseValidation = nil
     }
 }
@@ -2403,9 +2281,6 @@ class SettingsWindowController {
 }
 
 class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
-    private let openaiModels = ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "o4-mini"]
-    private let anthropicModels = ["claude-sonnet-4-20250514", "claude-haiku-4-20250414", "claude-opus-4-20250514"]
-
     private var tabView: NSTabView!
 
     // General tab controls
@@ -2418,12 +2293,9 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
 
     // AI tab controls
     private var aiEnabledCheckbox: NSButton!
-    private var providerPopup: NSPopUpButton!
     private var modelPopup: NSPopUpButton!
     private var ollamaStatusLabel: NSTextField!
     private var ollamaInstallButton: NSButton!
-    private var apiKeyLabel: NSTextField!
-    private var apiKeyField: NSSecureTextField!
     private var testButton: NSButton!
     private var testResultLabel: NSTextField!
 
@@ -2731,29 +2603,16 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
 
         var y: CGFloat = 260
 
-        // AI text cleanup
-        aiEnabledCheckbox = NSButton(checkboxWithTitle: "AI text cleanup", target: self, action: #selector(aiEnabledChanged))
-        aiEnabledCheckbox.frame = NSRect(x: 20, y: y, width: 200, height: 22)
+        // Local AI text cleanup
+        aiEnabledCheckbox = NSButton(checkboxWithTitle: "Local AI text cleanup", target: self, action: #selector(aiEnabledChanged))
+        aiEnabledCheckbox.frame = NSRect(x: 20, y: y, width: 220, height: 22)
         aiEnabledCheckbox.state = Settings.shared.aiEnabled ? .on : .off
         container.addSubview(aiEnabledCheckbox)
 
         y -= 40
 
-        // Provider
-        addLabel("Provider:", at: NSPoint(x: 20, y: y), in: container)
-        providerPopup = NSPopUpButton(frame: NSRect(x: 180, y: y - 2, width: 200, height: 26), pullsDown: false)
-        for provider in AIProvider.allCases {
-            providerPopup.addItem(withTitle: provider.rawValue)
-        }
-        providerPopup.selectItem(withTitle: Settings.shared.aiProvider.rawValue)
-        providerPopup.target = self
-        providerPopup.action = #selector(providerChanged)
-        container.addSubview(providerPopup)
-
-        y -= 40
-
         // Model
-        addLabel("Model:", at: NSPoint(x: 20, y: y), in: container)
+        addLabel("Ollama model:", at: NSPoint(x: 20, y: y), in: container)
         modelPopup = NSPopUpButton(frame: NSRect(x: 180, y: y - 2, width: 200, height: 26), pullsDown: false)
         modelPopup.target = self
         modelPopup.action = #selector(modelChanged)
@@ -2777,19 +2636,6 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         ollamaInstallButton.isHidden = true
         container.addSubview(ollamaInstallButton)
 
-        y -= 34
-
-        // API Key
-        apiKeyLabel = NSTextField(labelWithString: "API Key:")
-        apiKeyLabel.frame = NSRect(x: 20, y: y, width: 150, height: 22)
-        container.addSubview(apiKeyLabel)
-
-        apiKeyField = NSSecureTextField(frame: NSRect(x: 180, y: y - 2, width: 200, height: 24))
-        apiKeyField.stringValue = Settings.shared.apiKey
-        apiKeyField.target = self
-        apiKeyField.action = #selector(apiKeyChanged)
-        container.addSubview(apiKeyField)
-
         y -= 44
 
         // Test connection button
@@ -2804,8 +2650,6 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         testResultLabel.font = NSFont.systemFont(ofSize: 11)
         testResultLabel.lineBreakMode = .byTruncatingTail
         container.addSubview(testResultLabel)
-
-        updateAPIKeyVisibility()
 
         item.view = container
         return item
@@ -3080,7 +2924,7 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         deactivateButton.bezelStyle = .rounded
         deactivateButton.target = self
         deactivateButton.action = #selector(deactivateLicense)
-        deactivateButton.isEnabled = Settings.shared.isLicensed
+        deactivateButton.isEnabled = Settings.shared.hasStoredLicenseCredentials
         container.addSubview(deactivateButton)
 
         y -= 36
@@ -3139,7 +2983,7 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
             self?.licenseResultLabel.stringValue = message
             self?.licenseResultLabel.textColor = success ? .systemGreen : .systemRed
             self?.activateButton.isEnabled = true
-            self?.deactivateButton.isEnabled = Settings.shared.isLicensed
+            self?.deactivateButton.isEnabled = Settings.shared.hasStoredLicenseCredentials
             self?.updateLicenseStatusLabel()
         }
     }
@@ -3172,20 +3016,8 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
     private func populateModelPopup() {
         modelPopup.removeAllItems()
         let saved = Settings.shared.aiModel
-
-        switch Settings.shared.aiProvider {
-        case .openai:
-            modelPopup.addItems(withTitles: openaiModels)
-        case .anthropic:
-            modelPopup.addItems(withTitles: anthropicModels)
-        case .ollama:
-            modelPopup.addItem(withTitle: saved)
-            fetchOllamaModels()
-        }
-
-        if modelPopup.item(withTitle: saved) == nil {
-            modelPopup.addItem(withTitle: saved)
-        }
+        modelPopup.addItem(withTitle: saved)
+        fetchOllamaModels()
         modelPopup.selectItem(withTitle: saved)
         updateOllamaStatus()
     }
@@ -3216,19 +3048,7 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         }.resume()
     }
 
-    private func updateAPIKeyVisibility() {
-        let needsKey = Settings.shared.aiProvider != .ollama
-        apiKeyLabel.isHidden = !needsKey
-        apiKeyField.isHidden = !needsKey
-    }
-
     private func updateOllamaStatus() {
-        guard Settings.shared.aiProvider == .ollama else {
-            ollamaStatusLabel.isHidden = true
-            ollamaInstallButton.isHidden = true
-            return
-        }
-
         guard let url = URL(string: "http://localhost:11434/api/tags") else { return }
         URLSession.shared.dataTask(with: url) { [weak self] _, response, error in
             DispatchQueue.main.async {
@@ -3301,6 +3121,9 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         popoStepper?.integerValue = 5
         popoLabel?.stringValue = "5"
         clipboardCheckbox?.state = .on
+        aiEnabledCheckbox?.state = .on
+        populateModelPopup()
+        testResultLabel?.stringValue = ""
         overlayEnabledCheckbox?.state = .on
         overlayAppNameCheckbox?.state = .on
         overlayAppIconCheckbox?.state = .on
@@ -3322,40 +3145,17 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         Settings.shared.aiEnabled = aiEnabledCheckbox.state == .on
     }
 
-    @objc private func providerChanged() {
-        if let title = providerPopup.selectedItem?.title,
-           let provider = AIProvider.allCases.first(where: { $0.rawValue == title }) {
-            Settings.shared.aiProvider = provider
-        }
-        // Update model popup, API key visibility, and Ollama status for new provider
-        populateModelPopup()
-        apiKeyField.stringValue = Settings.shared.apiKey
-        updateAPIKeyVisibility()
-        updateOllamaStatus()
-        testResultLabel.stringValue = ""
-    }
-
     @objc private func modelChanged() {
         if let title = modelPopup.selectedItem?.title {
             Settings.shared.aiModel = title
         }
     }
 
-    @objc private func apiKeyChanged() {
-        Settings.shared.apiKey = apiKeyField.stringValue
-    }
-
     @objc private func testConnection() {
         testResultLabel.stringValue = "Testing..."
         testResultLabel.textColor = .secondaryLabelColor
 
-        let client: AIClient
-        switch Settings.shared.aiProvider {
-        case .ollama:    client = OllamaClient()
-        case .openai:    client = OpenAIClient()
-        case .anthropic: client = AnthropicClient()
-        }
-
+        let client = OllamaClient()
         client.testConnection { [weak self] success, message in
             DispatchQueue.main.async {
                 self?.testResultLabel.stringValue = message
@@ -3807,8 +3607,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             showNotification(title: "Voice", body: "Whisper model not found at \(Settings.shared.whisperModelPath)")
         }
 
-        // Ollama health check and warmup (only if Ollama is the selected provider)
-        if Settings.shared.aiProvider == .ollama {
+        // Ollama health check and warmup for local cleanup.
+        if Settings.shared.aiEnabled {
             ollamaClient.healthCheck { [weak self] available in
                 if available {
                     self?.ollamaClient.warmup()
@@ -4555,11 +4355,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             // Count words and check free tier limit
             let wordCount = rawText.split(separator: " ").count
             Settings.shared.addWords(wordCount)
-            if Settings.shared.isOverLimit && !Settings.shared.isLicensed {
+            if !LicenseManager.shared.canRecord {
+                let errorMessage: String
+                switch LicenseManager.shared.currentState {
+                case .limitReached:
+                    errorMessage = "Weekly limit reached"
+                case .invalid:
+                    errorMessage = "License invalid"
+                case .free, .licensed, .offlineGrace:
+                    errorMessage = "Recording unavailable"
+                }
                 DispatchQueue.main.async {
                     LicenseExpiryWindowController.shared.show()
                 }
-                finishProcessing(error: "Weekly limit reached")
+                finishProcessing(error: errorMessage)
                 cleanup(audioFile)
                 return
             }
@@ -4575,14 +4384,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             }
 
             let context = AppContext.current()
-            let client: AIClient
-            switch Settings.shared.aiProvider {
-            case .ollama:    client = ollamaClient
-            case .openai:    client = OpenAIClient()
-            case .anthropic: client = AnthropicClient()
-            }
-
-            client.cleanupText(rawText, appContext: context) { [weak self] cleanedText in
+            ollamaClient.cleanupText(rawText, appContext: context) { [weak self] cleanedText in
                 DispatchQueue.main.async {
                     self?.refocusAndInject(cleanedText)
                     self?.finishProcessing(text: cleanedText)

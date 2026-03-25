@@ -6,9 +6,9 @@
 
 **Local speech-to-text for macOS. Hold fn, speak, release. Text appears wherever your cursor is.**
 
-Voice is a menu bar and Dock app that replaces cloud-based dictation with fast, private, local transcription. It works everywhere -- terminals, browsers, editors, chat apps -- without sending a single byte off your machine.
+Voice is a menu bar and Dock app that replaces cloud-based dictation with fast, private, local transcription. It works everywhere -- terminals, browsers, editors, chat apps -- while keeping your audio and transcriptions on your Mac.
 
-Built with [whisper.cpp](https://github.com/ggerganov/whisper.cpp) for transcription and optionally [Ollama](https://ollama.ai) for local AI text cleanup. 100% on-device, nothing leaves your machine. Inspired by [Wispr Flow](https://wispr.com).
+Built with [whisper.cpp](https://github.com/ggerganov/whisper.cpp) for transcription and optionally [Ollama](https://ollama.ai) for local AI text cleanup. Voice does not send audio or transcripts to remote AI services. License activation and validation still use LemonSqueezy. Inspired by [Wispr Flow](https://wispr.com).
 
 ---
 
@@ -76,9 +76,9 @@ Open from the menu bar (click the waveform icon > "Settings...") or press **Cmd+
 
 | Setting | Description | Default |
 |---------|-------------|---------|
-| AI text cleanup | Enable/disable AI post-processing of transcriptions | On |
+| Local AI text cleanup | Enable/disable AI post-processing of transcriptions | On |
 | Model | Ollama model name for text cleanup | llama3.2:3b |
-| Test Connection | Verify Ollama is reachable | -- |
+| Test Connection | Verify the local Ollama service is reachable | -- |
 
 ### Transcription
 
@@ -117,7 +117,7 @@ brew services start ollama
 ollama pull llama3.2:3b
 ```
 
-Test the connection in the AI tab of Settings. If AI cleanup is disabled (or Ollama is unreachable), raw whisper output is used.
+Test the connection in the AI tab of Settings. If local AI cleanup is disabled (or Ollama is unreachable), raw whisper output is used.
 
 ## Requirements
 

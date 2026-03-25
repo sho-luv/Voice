@@ -1,17 +1,22 @@
+### 2026-03-24
+- Removed remote AI provider integrations and API-key settings
+- Simplified AI cleanup to the local Ollama path only
+- Updated website and privacy copy to match local transcription behavior and license traffic
+
 ### 2026-03-07
 - Added native Settings window (Cmd+, or menu bar > Settings...) with 3 tabs: General, AI, Transcription
 - Settings singleton wrapping UserDefaults with typed properties and register(defaults:) for all preferences
 - General tab: push-to-talk key selector (fn, Right Option, Left Option, Right Cmd), sounds toggle, auto-start on login, POPO timeout (1-30 min), clipboard restore toggle
-- AI tab: enable/disable AI cleanup, provider selector (Ollama/OpenAI/Anthropic), model field, API key (secure field, hidden for Ollama), test connection button
+- AI tab: enable/disable local AI cleanup, model field, Ollama install flow, test connection button
 - Transcription tab: whisper model selector (small.en, medium.en, large-v3), download model button
-- Added AIClient protocol with OllamaClient (refactored), OpenAIClient, and AnthropicClient implementations
-- Wired all settings into existing code: hotkey, sounds, POPO timeout, clipboard restore, whisper model, AI provider routing
+- Added Ollama-based cleanup client for local post-processing
+- Wired all settings into existing code: hotkey, sounds, POPO timeout, clipboard restore, whisper model, local AI cleanup
 - Cached hotkey values on InputMonitor instance to avoid UserDefaults access inside CGEventTap callback (performance/stability)
 - Fixed macOS window restoration issue: settings window appeared on relaunch. Applied multi-layered fix — NSQuitAlwaysKeepsWindows before app.run(), isRestorable=false on window, close windows on quit, delete saved state on launch
 - Key discovery: recompiling the binary changes its hash, causing macOS TCC to revoke accessibility permission (CGEvent.tapCreate returns nil). Ad-hoc signing (codesign --sign -) uses hash-based identity that changes per compile.
 - Solution: created self-signed "Voice Dev" code signing certificate with stable identity. TCC preserves accessibility permission across recompiles. install.sh updated to prefer "Voice Dev" cert with ad-hoc fallback.
 - Critical permission workflow: app must NOT be running when granting accessibility — kill first, grant in System Settings, then launch
-- Updated README with full Settings documentation, AI providers, code signing certificate setup, troubleshooting guide
+- Updated README with full Settings documentation, local AI cleanup, code signing certificate setup, troubleshooting guide
 
 ### 2026-03-06
 - Rewrote VoiceMic v1.0 → Voice v3.0 (complete rewrite, ~1100 lines)
