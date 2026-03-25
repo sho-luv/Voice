@@ -181,7 +181,7 @@ if command -v create-dmg &>/dev/null; then
         --text-size 12 \
         --icon "Voice.app" 175 195 \
         --hide-extension "Voice.app" \
-        --app-drop-link 485 195 \
+        --icon "Applications" 485 195 \
         "${SCRIPT_DIR}/${DMG_NAME}" \
         "${STAGING}/"
 else

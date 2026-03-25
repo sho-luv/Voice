@@ -1846,6 +1846,8 @@ class OnboardingWindowController {
             NSApp.activate(ignoringOtherApps: true)
             return
         }
+        // Show Dock icon during onboarding so the window is discoverable
+        NSApp.setActivationPolicy(.regular)
         let w = createWindow()
         window = w
         showStep(0)
@@ -1864,6 +1866,7 @@ class OnboardingWindowController {
         w.center()
         w.isReleasedWhenClosed = false
         w.isRestorable = false
+        w.level = .floating  // Stay on top so the window doesn't get lost
 
         guard let contentView = w.contentView else { return w }
 
@@ -1872,20 +1875,22 @@ class OnboardingWindowController {
         let accessibilityStep = createAccessibilityStep(in: contentView)
         let micStep = createMicrophoneStep(in: contentView)
         let testStep = createTestStep(in: contentView)
+        let tourStep = createTourStep(in: contentView)
 
-        stepViews = [welcomeStep, accessibilityStep, micStep, testStep]
+        stepViews = [welcomeStep, accessibilityStep, micStep, testStep, tourStep]
         for sv in stepViews {
             sv.isHidden = true
             contentView.addSubview(sv)
         }
 
         // Progress dots at bottom center
+        let stepCount = 5
         let dotContainer = NSView(frame: NSRect(x: 160, y: 16, width: 160, height: 16))
         let dotSize: CGFloat = 8
         let dotSpacing: CGFloat = 20
-        let totalDotWidth = CGFloat(4) * dotSize + CGFloat(3) * (dotSpacing - dotSize)
+        let totalDotWidth = CGFloat(stepCount) * dotSize + CGFloat(stepCount - 1) * (dotSpacing - dotSize)
         let startX = (160 - totalDotWidth) / 2
-        for i in 0..<4 {
+        for i in 0..<stepCount {
             let dot = NSView(frame: NSRect(x: startX + CGFloat(i) * dotSpacing, y: 4, width: dotSize, height: dotSize))
             dot.wantsLayer = true
             dot.layer?.cornerRadius = dotSize / 2
@@ -1931,6 +1936,8 @@ class OnboardingWindowController {
             nextButton?.title = "Next"
             // Disabled until AX granted — startAccessibilityStepPolling manages this
             nextButton?.isEnabled = AXIsProcessTrusted()
+            // Don't auto-trigger the system dialog — let the user read the context first,
+            // then click "Open System Settings" when ready.
             startAccessibilityStepPolling()
         case 2:
             nextButton?.title = "Next"
@@ -1938,7 +1945,10 @@ class OnboardingWindowController {
             let status = AVCaptureDevice.authorizationStatus(for: .audio)
             nextButton?.isEnabled = (status == .authorized)
         case 3:
-            nextButton?.title = "Finish"
+            nextButton?.title = "Next"
+            nextButton?.isEnabled = true
+        case 4:
+            nextButton?.title = "Done"
             nextButton?.isEnabled = true
         default:
             break
@@ -1960,6 +1970,14 @@ class OnboardingWindowController {
         Settings.shared.onboardingComplete = true
         window?.close()
         window = nil
+        // Revert to menu bar-only (no Dock icon)
+        NSApp.setActivationPolicy(.accessory)
+        // Now start the input monitor and accessibility polling
+        // (deferred from launch to avoid system dialog during onboarding)
+        if let appDelegate = NSApp.delegate as? AppDelegate {
+            appDelegate.startAccessibilityPolling()
+            _ = appDelegate.inputMonitor.start()
+        }
     }
 
     // MARK: - Step Builders
@@ -2002,10 +2020,10 @@ class OnboardingWindowController {
         view.addSubview(title)
 
         // Explanation
-        let explanation = NSTextField(wrappingLabelWithString: "Voice needs Accessibility permission to detect your hotkey. Without it, Voice can't listen for the fn key press.")
+        let explanation = NSTextField(wrappingLabelWithString: "Voice needs Accessibility permission to detect your hotkey. Click below to open System Settings, find Voice in the list, and toggle it on.")
         explanation.font = NSFont.systemFont(ofSize: 14)
         explanation.textColor = NSColor.secondaryLabelColor
-        explanation.frame = NSRect(x: 40, y: 160, width: 400, height: 70)
+        explanation.frame = NSRect(x: 40, y: 150, width: 400, height: 80)
         explanation.alignment = .center
         view.addSubview(explanation)
 
@@ -2026,8 +2044,8 @@ class OnboardingWindowController {
         statusLabel.identifier = NSUserInterfaceItemIdentifier("axStatusLabel")
         view.addSubview(statusLabel)
 
-        // Trigger system prompt
-        _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeRetainedValue(): true] as CFDictionary)
+        // NOTE: system prompt is triggered in showStep(1), not here,
+        // so it doesn't appear during the Welcome step.
 
         return view
     }
@@ -2134,6 +2152,65 @@ class OnboardingWindowController {
         return view
     }
 
+    private func createTourStep(in container: NSView) -> NSView {
+        let view = NSView(frame: NSRect(x: 0, y: 50, width: 480, height: 300))
+
+        // Title
+        let title = NSTextField(labelWithString: "How to Use Voice")
+        title.font = NSFont.boldSystemFont(ofSize: 18)
+        title.frame = NSRect(x: 40, y: 250, width: 400, height: 30)
+        title.alignment = .center
+        view.addSubview(title)
+
+        // Tip rows with SF Symbols
+        let tips: [(String, String)] = [
+            ("fn", "Hold fn to record, release to transcribe"),
+            ("waveform.path", "A waveform overlay appears while recording"),
+            ("menubar.rectangle", "Look for the Voice icon in your menu bar"),
+            ("gear", "Click the menu bar icon for settings and hotkey options"),
+            ("keyboard", "Double-tap fn for hands-free mode (tap again to stop)")
+        ]
+
+        var y = 220
+        for (iconName, text) in tips {
+            // Icon
+            let iconView = NSImageView(frame: NSRect(x: 50, y: y - 4, width: 20, height: 20))
+            if let img = NSImage(systemSymbolName: iconName, accessibilityDescription: nil) {
+                iconView.image = img
+                iconView.contentTintColor = NSColor.controlAccentColor
+            } else {
+                // Fallback for "fn" which isn't an SF Symbol
+                let label = NSTextField(labelWithString: "fn")
+                label.font = NSFont.boldSystemFont(ofSize: 11)
+                label.textColor = NSColor.controlAccentColor
+                label.frame = NSRect(x: 50, y: y - 2, width: 20, height: 18)
+                label.alignment = .center
+                view.addSubview(label)
+            }
+            iconView.imageScaling = .scaleProportionallyUpOrDown
+            view.addSubview(iconView)
+
+            // Text
+            let tipLabel = NSTextField(labelWithString: text)
+            tipLabel.font = NSFont.systemFont(ofSize: 13)
+            tipLabel.textColor = NSColor.secondaryLabelColor
+            tipLabel.frame = NSRect(x: 80, y: y - 2, width: 360, height: 20)
+            view.addSubview(tipLabel)
+
+            y -= 34
+        }
+
+        // Footer note
+        let footer = NSTextField(labelWithString: "Voice lives in your menu bar — no Dock icon needed.")
+        footer.font = NSFont.systemFont(ofSize: 11)
+        footer.textColor = NSColor.tertiaryLabelColor
+        footer.frame = NSRect(x: 40, y: 30, width: 400, height: 18)
+        footer.alignment = .center
+        view.addSubview(footer)
+
+        return view
+    }
+
     // MARK: - Accessibility Step Polling
 
     private func startAccessibilityStepPolling() {
@@ -2155,12 +2232,6 @@ class OnboardingWindowController {
                     }
                 }
                 self.nextButton?.isEnabled = true
-                // Auto-advance after 0.5s
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                    if self?.currentStep == 1 {
-                        self?.nextStep()
-                    }
-                }
             }
         }
     }
@@ -2168,6 +2239,7 @@ class OnboardingWindowController {
     // MARK: - Actions
 
     @objc private func openAccessibilitySettings() {
+        // Just open System Settings — no system dialog. Our onboarding already explains everything.
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
     }
 
@@ -3571,25 +3643,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // First-launch onboarding (per D-05)
         if !Settings.shared.onboardingComplete {
             OnboardingWindowController.shared.show()
+            // Skip license enforcement during onboarding — it can steal focus
+        } else {
+            // License enforcement (per D-07, D-11)
+            LicenseManager.shared.validateIfNeeded()
+            if !LicenseManager.shared.canRecord {
+                LicenseExpiryWindowController.shared.show()
+            }
         }
-
-        // License enforcement (per D-07, D-11)
-        LicenseManager.shared.validateIfNeeded()
-        if !LicenseManager.shared.canRecord {
-            LicenseExpiryWindowController.shared.show()
-        }
-
-        // Start accessibility polling for auto-restart (per D-19, D-20)
-        startAccessibilityPolling()
 
         inputMonitor.reloadHotkey()
-        if !inputMonitor.start() {
-            if Settings.shared.onboardingComplete {
-                // Only show notification if onboarding already done (onboarding handles its own UX)
+        // During onboarding, skip everything that touches Accessibility —
+        // AXIsProcessTrusted() can trigger the system dialog on macOS Sequoia.
+        // The onboarding completion handler will start these.
+        if Settings.shared.onboardingComplete {
+            // Start accessibility polling for auto-restart (per D-19, D-20)
+            startAccessibilityPolling()
+
+            if !inputMonitor.start() {
                 showNotification(title: "Voice", body: "Accessibility permission required. Add Voice.app in System Settings > Privacy & Security > Accessibility.")
                 NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+                // AX polling timer (started above) will handle relaunch when permission is granted
             }
-            // AX polling timer (started above) will handle relaunch when permission is granted
         }
 
         // Listen for audio device changes (Bluetooth connect/disconnect)
