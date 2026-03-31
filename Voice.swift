@@ -1835,6 +1835,176 @@ class LicenseExpiryWindowController {
     }
 }
 
+// MARK: - Model Download Window
+
+class ModelDownloadWindowController: NSObject, URLSessionDownloadDelegate {
+    static let shared = ModelDownloadWindowController()
+
+    private var window: NSWindow?
+    private var progressBar: NSProgressIndicator?
+    private var statusLabel: NSTextField?
+    private var downloadTask: URLSessionDownloadTask?
+    private var completion: (() -> Void)?
+
+    func ensureModel(completion: @escaping () -> Void) {
+        // Already have the model — nothing to do
+        if FileManager.default.fileExists(atPath: Settings.shared.whisperModelPath) {
+            completion()
+            return
+        }
+        // Check bundled model in app Resources
+        let bundled = (Bundle.main.resourcePath ?? "") + "/ggml-\(Settings.shared.whisperModel).bin"
+        if FileManager.default.fileExists(atPath: bundled) {
+            completion()
+            return
+        }
+        self.completion = completion
+        showWindow()
+        startDownload()
+    }
+
+    private func showWindow() {
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 160),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        w.title = "Downloading Speech Model"
+        w.center()
+        w.isReleasedWhenClosed = false
+        w.level = .floating
+
+        guard let contentView = w.contentView else { return }
+
+        let title = NSTextField(labelWithString: "Downloading speech recognition model...")
+        title.font = NSFont.boldSystemFont(ofSize: 14)
+        title.frame = NSRect(x: 30, y: 110, width: 360, height: 22)
+        contentView.addSubview(title)
+
+        let subtitle = NSTextField(wrappingLabelWithString: "This is a one-time download (~547 MB). Voice needs this model to transcribe speech locally on your Mac.")
+        subtitle.font = NSFont.systemFont(ofSize: 12)
+        subtitle.textColor = .secondaryLabelColor
+        subtitle.frame = NSRect(x: 30, y: 68, width: 360, height: 36)
+        contentView.addSubview(subtitle)
+
+        let bar = NSProgressIndicator(frame: NSRect(x: 30, y: 44, width: 360, height: 20))
+        bar.style = .bar
+        bar.isIndeterminate = false
+        bar.minValue = 0
+        bar.maxValue = 100
+        bar.doubleValue = 0
+        contentView.addSubview(bar)
+        progressBar = bar
+
+        let status = NSTextField(labelWithString: "Starting download...")
+        status.font = NSFont.systemFont(ofSize: 11)
+        status.textColor = .secondaryLabelColor
+        status.frame = NSRect(x: 30, y: 18, width: 360, height: 18)
+        contentView.addSubview(status)
+        statusLabel = status
+
+        window = w
+        NSApp.setActivationPolicy(.regular)
+        w.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func startDownload() {
+        let modelName = Settings.shared.whisperModel
+        let urlString = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-\(modelName).bin"
+        guard let url = URL(string: urlString) else {
+            statusLabel?.stringValue = "Error: invalid download URL"
+            return
+        }
+
+        let modelDir = NSHomeDirectory() + "/Library/Application Support/Voice/Models"
+        try? FileManager.default.createDirectory(atPath: modelDir, withIntermediateDirectories: true)
+
+        let config = URLSessionConfiguration.default
+        let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+        downloadTask = session.downloadTask(with: url)
+        downloadTask?.resume()
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
+                    totalBytesExpectedToWrite: Int64) {
+        DispatchQueue.main.async {
+            if totalBytesExpectedToWrite > 0 {
+                let pct = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite) * 100
+                self.progressBar?.doubleValue = pct
+                let mbDone = Double(totalBytesWritten) / 1_048_576
+                let mbTotal = Double(totalBytesExpectedToWrite) / 1_048_576
+                self.statusLabel?.stringValue = String(format: "%.0f / %.0f MB (%.0f%%)", mbDone, mbTotal, pct)
+            } else {
+                let mbDone = Double(totalBytesWritten) / 1_048_576
+                self.statusLabel?.stringValue = String(format: "%.0f MB downloaded...", mbDone)
+            }
+        }
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didFinishDownloadingTo location: URL) {
+        let modelName = Settings.shared.whisperModel
+        let modelDir = NSHomeDirectory() + "/Library/Application Support/Voice/Models"
+        let dest = "\(modelDir)/ggml-\(modelName).bin"
+
+        do {
+            if FileManager.default.fileExists(atPath: dest) {
+                try FileManager.default.removeItem(atPath: dest)
+            }
+            try FileManager.default.moveItem(at: location, to: URL(fileURLWithPath: dest))
+            DispatchQueue.main.async {
+                self.statusLabel?.stringValue = "Download complete!"
+                self.progressBar?.doubleValue = 100
+                // Brief pause so user sees "complete", then close
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    self.window?.close()
+                    self.window = nil
+                    // Revert to accessory if onboarding is done
+                    if Settings.shared.onboardingComplete {
+                        NSApp.setActivationPolicy(.accessory)
+                    }
+                    self.completion?()
+                    self.completion = nil
+                }
+            }
+        } catch {
+            DispatchQueue.main.async {
+                self.statusLabel?.stringValue = "Error: \(error.localizedDescription)"
+                self.statusLabel?.textColor = .systemRed
+            }
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard let error = error else { return }
+        DispatchQueue.main.async {
+            self.statusLabel?.stringValue = "Download failed: \(error.localizedDescription)"
+            self.statusLabel?.textColor = .systemRed
+            // Add retry button
+            let retryBtn = NSButton(frame: NSRect(x: 160, y: 18, width: 100, height: 24))
+            retryBtn.title = "Retry"
+            retryBtn.bezelStyle = .rounded
+            retryBtn.target = self
+            retryBtn.action = #selector(self.retryDownload)
+            self.window?.contentView?.addSubview(retryBtn)
+        }
+    }
+
+    @objc private func retryDownload() {
+        statusLabel?.textColor = .secondaryLabelColor
+        statusLabel?.stringValue = "Retrying..."
+        progressBar?.doubleValue = 0
+        // Remove retry button
+        for v in window?.contentView?.subviews ?? [] {
+            if let btn = v as? NSButton, btn.title == "Retry" { btn.removeFromSuperview() }
+        }
+        startDownload()
+    }
+}
+
 // MARK: - Onboarding Wizard
 
 class OnboardingWindowController {
@@ -3304,104 +3474,90 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         }
     }
 
+    private func findOllamaBinary() -> String? {
+        // Check common install locations — no hardcoded brew dependency
+        let candidates = [
+            "/usr/local/bin/ollama",
+            "/opt/homebrew/bin/ollama",
+            NSHomeDirectory() + "/.ollama/bin/ollama",
+            "/Applications/Ollama.app/Contents/Resources/ollama"
+        ]
+        for path in candidates {
+            if FileManager.default.fileExists(atPath: path) { return path }
+        }
+        return nil
+    }
+
     @objc private func installOllama() {
+        // Open ollama.com download page — no Homebrew dependency
+        if let url = URL(string: "https://ollama.com/download/mac") {
+            NSWorkspace.shared.open(url)
+        }
+        ollamaStatusLabel.stringValue = "Download Ollama from ollama.com, then reopen Settings"
+        ollamaStatusLabel.textColor = .secondaryLabelColor
+        ollamaStatusLabel.isHidden = false
+        ollamaInstallButton.title = "Check Again"
+        ollamaInstallButton.action = #selector(recheckOllama)
+    }
+
+    @objc private func recheckOllama() {
         ollamaInstallButton.isEnabled = false
-        ollamaStatusLabel.stringValue = "Installing Ollama..."
+        ollamaStatusLabel.stringValue = "Checking..."
         ollamaStatusLabel.textColor = .secondaryLabelColor
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            // Step 1: brew install ollama
-            let brewInstall = Process()
-            brewInstall.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/brew")
-            brewInstall.arguments = ["install", "ollama"]
-            let installPipe = Pipe()
-            brewInstall.standardOutput = installPipe
-            brewInstall.standardError = installPipe
+        // Check if Ollama server is now running
+        updateOllamaStatus()
 
-            do {
-                try brewInstall.run()
-                brewInstall.waitUntilExit()
-            } catch {
+        // Also check if the binary exists now
+        if let ollamaPath = findOllamaBinary() {
+            // Ollama is installed — try to pull the default model
+            ollamaStatusLabel.stringValue = "Pulling llama3.2:3b model..."
+
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let pull = Process()
+                pull.executableURL = URL(fileURLWithPath: ollamaPath)
+                pull.arguments = ["pull", "llama3.2:3b"]
+                let pullPipe = Pipe()
+                pull.standardOutput = pullPipe
+                pull.standardError = pullPipe
+
+                do {
+                    try pull.run()
+                    pull.waitUntilExit()
+                } catch {
+                    DispatchQueue.main.async {
+                        self?.ollamaStatusLabel.stringValue = "Model pull failed: \(error.localizedDescription)"
+                        self?.ollamaStatusLabel.textColor = .systemRed
+                        self?.ollamaInstallButton.isEnabled = true
+                    }
+                    return
+                }
+
+                guard pull.terminationStatus == 0 else {
+                    DispatchQueue.main.async {
+                        self?.ollamaStatusLabel.stringValue = "Model pull failed"
+                        self?.ollamaStatusLabel.textColor = .systemRed
+                        self?.ollamaInstallButton.isEnabled = true
+                    }
+                    return
+                }
+
                 DispatchQueue.main.async {
-                    self?.ollamaStatusLabel.stringValue = "Install failed: \(error.localizedDescription)"
-                    self?.ollamaStatusLabel.textColor = .systemRed
-                    self?.ollamaInstallButton.isEnabled = true
-                }
-                return
-            }
-
-            guard brewInstall.terminationStatus == 0 else {
-                let data = installPipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8) ?? "Unknown error"
-                let firstLine = output.components(separatedBy: .newlines).first(where: { !$0.isEmpty }) ?? "brew install failed"
-                DispatchQueue.main.async {
-                    self?.ollamaStatusLabel.stringValue = firstLine
-                    self?.ollamaStatusLabel.textColor = .systemRed
-                    self?.ollamaInstallButton.isEnabled = true
-                }
-                return
-            }
-
-            // Step 2: Start Ollama via brew services
-            DispatchQueue.main.async {
-                self?.ollamaStatusLabel.stringValue = "Starting Ollama..."
-            }
-
-            let brewStart = Process()
-            brewStart.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/brew")
-            brewStart.arguments = ["services", "start", "ollama"]
-            brewStart.standardOutput = FileHandle.nullDevice
-            brewStart.standardError = FileHandle.nullDevice
-            try? brewStart.run()
-            brewStart.waitUntilExit()
-
-            // Wait for the server to be ready
-            Thread.sleep(forTimeInterval: 3.0)
-
-            // Step 3: Pull default model
-            DispatchQueue.main.async {
-                self?.ollamaStatusLabel.stringValue = "Pulling llama3.2:3b model..."
-            }
-
-            let pull = Process()
-            pull.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/ollama")
-            pull.arguments = ["pull", "llama3.2:3b"]
-            let pullPipe = Pipe()
-            pull.standardOutput = pullPipe
-            pull.standardError = pullPipe
-
-            do {
-                try pull.run()
-                pull.waitUntilExit()
-            } catch {
-                DispatchQueue.main.async {
-                    self?.ollamaStatusLabel.stringValue = "Model pull failed: \(error.localizedDescription)"
-                    self?.ollamaStatusLabel.textColor = .systemRed
-                    self?.ollamaInstallButton.isEnabled = true
-                }
-                return
-            }
-
-            guard pull.terminationStatus == 0 else {
-                DispatchQueue.main.async {
-                    self?.ollamaStatusLabel.stringValue = "Model pull failed"
-                    self?.ollamaStatusLabel.textColor = .systemRed
-                    self?.ollamaInstallButton.isEnabled = true
-                }
-                return
-            }
-
-            // Success
-            DispatchQueue.main.async {
-                self?.ollamaStatusLabel.stringValue = "Ollama ready!"
-                self?.ollamaStatusLabel.textColor = .systemGreen
-                self?.ollamaInstallButton.isHidden = true
-                self?.populateModelPopup()
-                // Hide status after a few seconds
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                    self?.ollamaStatusLabel.isHidden = true
+                    self?.ollamaStatusLabel.stringValue = "Ollama ready!"
+                    self?.ollamaStatusLabel.textColor = .systemGreen
+                    self?.ollamaInstallButton.isHidden = true
+                    self?.populateModelPopup()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                        self?.ollamaStatusLabel.isHidden = true
+                    }
                 }
             }
+        } else {
+            ollamaStatusLabel.stringValue = "Ollama not found — install from ollama.com"
+            ollamaStatusLabel.textColor = .systemOrange
+            ollamaInstallButton.isEnabled = true
+            ollamaInstallButton.title = "Download Ollama"
+            ollamaInstallButton.action = #selector(installOllama)
         }
     }
 
@@ -3518,7 +3674,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     var whisperPath: String {
         let bundled = Bundle.main.resourcePath! + "/whisper-cli"
         if FileManager.default.fileExists(atPath: bundled) { return bundled }
-        return "/opt/homebrew/bin/whisper-cli"
+        // Search common install locations as last resort
+        for path in ["/opt/homebrew/bin/whisper-cli", "/usr/local/bin/whisper-cli"] {
+            if FileManager.default.fileExists(atPath: path) { return path }
+        }
+        // Return bundled path anyway — transcribeAndProcess will show proper error on launch failure
+        return bundled
     }
     let afplayPath = "/usr/bin/afplay"
 
@@ -3751,16 +3912,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // License validation for existing subscribers
         LicenseManager.shared.validateIfNeeded()
 
-        // Preflight checks
-        if !FileManager.default.fileExists(atPath: Settings.shared.whisperModelPath) {
-            showNotification(title: "Voice", body: "Whisper model not found at \(Settings.shared.whisperModelPath)")
-        }
-
-        // Ollama health check and warmup for local cleanup.
-        if Settings.shared.aiEnabled {
-            ollamaClient.healthCheck { [weak self] available in
-                if available {
-                    self?.ollamaClient.warmup()
+        // Preflight: ensure whisper model exists (auto-download if missing)
+        ModelDownloadWindowController.shared.ensureModel { [weak self] in
+            // Ollama health check and warmup for local cleanup.
+            if Settings.shared.aiEnabled {
+                self?.ollamaClient.healthCheck { [weak self] available in
+                    if available {
+                        self?.ollamaClient.warmup()
+                    }
                 }
             }
         }
