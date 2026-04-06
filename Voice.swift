@@ -1421,47 +1421,38 @@ class TextInjector {
     }
 }
 
-// MARK: - Ollama Client
+// MARK: - Local LLM Client
 
-class OllamaClient {
-    let baseURL = "http://localhost:11434"
+class LlamaClient {
+    private let modelFileName = "qwen2.5-0.5b-instruct-q4_0.gguf"
     private var isAvailable = false
 
-    var model: String { Settings.shared.aiModel }
+    var llamaPath: String {
+        let bundled = Bundle.main.resourcePath! + "/llama-completion"
+        if FileManager.default.fileExists(atPath: bundled) { return bundled }
+        for path in ["/opt/homebrew/bin/llama-completion", "/usr/local/bin/llama-completion"] {
+            if FileManager.default.fileExists(atPath: path) { return path }
+        }
+        return bundled
+    }
+
+    var modelPath: String {
+        // 1. Check app bundle (self-contained DMG)
+        let bundled = (Bundle.main.resourcePath ?? "") + "/\(modelFileName)"
+        if FileManager.default.fileExists(atPath: bundled) { return bundled }
+        // 2. Fall back to Application Support
+        return NSHomeDirectory() + "/Library/Application Support/Voice/Models/\(modelFileName)"
+    }
 
     func healthCheck(completion: @escaping (Bool) -> Void) {
-        guard let url = URL(string: "\(baseURL)/api/tags") else {
-            completion(false)
-            return
-        }
-
-        URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
-            guard let self = self, error == nil,
-                  let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200 else {
-                self?.isAvailable = false
-                completion(false)
-                return
-            }
-            self.isAvailable = true
-            completion(true)
-        }.resume()
+        let available = FileManager.default.fileExists(atPath: llamaPath)
+                     && FileManager.default.fileExists(atPath: modelPath)
+        isAvailable = available
+        completion(available)
     }
 
     func warmup() {
-        guard let url = URL(string: "\(baseURL)/api/generate") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let body: [String: Any] = [
-            "model": model,
-            "prompt": "Hello",
-            "stream": false,
-            "options": ["num_predict": 1]
-        ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        URLSession.shared.dataTask(with: request) { _, _, _ in }.resume()
+        // No warmup needed — model loads on demand per invocation
     }
 
     func cleanupText(_ text: String, appContext: AppContext, completion: @escaping (String) -> Void) {
@@ -1481,45 +1472,60 @@ class OllamaClient {
     func testConnection(completion: @escaping (Bool, String) -> Void) {
         healthCheck { available in
             if available {
-                completion(true, "Ollama is running, model: \(self.model)")
+                completion(true, "Built-in AI model ready")
             } else {
-                completion(false, "Cannot connect to Ollama at localhost:11434")
+                var missing: [String] = []
+                if !FileManager.default.fileExists(atPath: self.llamaPath) { missing.append("llama-completion binary") }
+                if !FileManager.default.fileExists(atPath: self.modelPath) { missing.append("AI model") }
+                completion(false, "Missing: \(missing.joined(separator: ", "))")
             }
         }
     }
 
     private func generate(system: String, prompt: String, completion: @escaping (String?) -> Void) {
-        guard let url = URL(string: "\(baseURL)/api/generate") else {
-            completion(nil)
-            return
-        }
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: llamaPath)
+            process.arguments = [
+                "-m", modelPath,
+                "-sys", system,
+                "-p", prompt,
+                "-n", "2048",
+                "--temp", "0.1",
+                "-ngl", "99",
+                "--no-display-prompt"
+            ]
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 30
-
-        let body: [String: Any] = [
-            "model": model,
-            "system": system,
-            "prompt": prompt,
-            "stream": false,
-            "options": ["temperature": 0.1, "num_predict": 2048]
-        ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            guard error == nil,
-                  let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let responseText = json["response"] as? String else {
-                completion(nil)
-                return
+            // Point to bundled ggml backend plugins if running from app bundle
+            var env = ProcessInfo.processInfo.environment
+            let bundleFrameworks = Bundle.main.bundlePath + "/Contents/Frameworks/llama"
+            if FileManager.default.fileExists(atPath: bundleFrameworks) {
+                env["GGML_BACKEND_PATH"] = bundleFrameworks + "/backends"
             }
+            process.environment = env
 
-            let cleaned = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
-            completion(cleaned.isEmpty ? nil : cleaned)
-        }.resume()
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = FileHandle.nullDevice
+
+            do {
+                try process.run()
+                process.waitUntilExit()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                var output = String(data: data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                // Strip trailing "> EOF by user" artifact from llama-completion
+                if output.hasSuffix("> EOF by user") {
+                    output = output.replacingOccurrences(of: "\n> EOF by user", with: "")
+                        .replacingOccurrences(of: "> EOF by user", with: "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                completion(output.isEmpty ? nil : output)
+            } catch {
+                NSLog("Voice: llama-completion failed: %@", error.localizedDescription)
+                completion(nil)
+            }
+        }
     }
 }
 
@@ -2575,11 +2581,6 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
 
     // AI tab controls
     private var aiEnabledCheckbox: NSButton!
-    private var modelPopup: NSPopUpButton!
-    private var ollamaStatusLabel: NSTextField!
-    private var ollamaInstallButton: NSButton!
-    private var testButton: NSButton!
-    private var testResultLabel: NSTextField!
     private var aiCustomPromptField: NSTextField!
 
     // Audio tab controls
@@ -2886,55 +2887,22 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
 
         var y: CGFloat = 260
 
-        // Local AI text cleanup
-        aiEnabledCheckbox = NSButton(checkboxWithTitle: "Local AI text cleanup", target: self, action: #selector(aiEnabledChanged))
+        // Local AI text cleanup toggle
+        aiEnabledCheckbox = NSButton(checkboxWithTitle: "AI text cleanup", target: self, action: #selector(aiEnabledChanged))
         aiEnabledCheckbox.frame = NSRect(x: 20, y: y, width: 220, height: 22)
         aiEnabledCheckbox.state = Settings.shared.aiEnabled ? .on : .off
         container.addSubview(aiEnabledCheckbox)
 
-        y -= 40
+        y -= 26
 
-        // Model
-        addLabel("Ollama model:", at: NSPoint(x: 20, y: y), in: container)
-        modelPopup = NSPopUpButton(frame: NSRect(x: 180, y: y - 2, width: 200, height: 26), pullsDown: false)
-        modelPopup.target = self
-        modelPopup.action = #selector(modelChanged)
-        container.addSubview(modelPopup)
-        populateModelPopup()
+        // Description
+        let desc = NSTextField(wrappingLabelWithString: "Cleans up grammar, removes filler words (um, uh, like), and handles corrections. Runs entirely on your Mac — nothing is sent to the cloud.")
+        desc.frame = NSRect(x: 38, y: y - 36, width: 392, height: 40)
+        desc.textColor = .secondaryLabelColor
+        desc.font = NSFont.systemFont(ofSize: 11)
+        container.addSubview(desc)
 
-        y -= 34
-
-        // Ollama status + install (hidden unless Ollama provider selected and unreachable)
-        ollamaStatusLabel = NSTextField(labelWithString: "")
-        ollamaStatusLabel.frame = NSRect(x: 20, y: y, width: 200, height: 22)
-        ollamaStatusLabel.textColor = .systemOrange
-        ollamaStatusLabel.font = NSFont.systemFont(ofSize: 12)
-        ollamaStatusLabel.isHidden = true
-        container.addSubview(ollamaStatusLabel)
-
-        ollamaInstallButton = NSButton(title: "Install Ollama", target: self, action: #selector(installOllama))
-        ollamaInstallButton.frame = NSRect(x: 230, y: y - 2, width: 150, height: 24)
-        ollamaInstallButton.bezelStyle = .rounded
-        ollamaInstallButton.font = NSFont.systemFont(ofSize: 11)
-        ollamaInstallButton.isHidden = true
-        container.addSubview(ollamaInstallButton)
-
-        y -= 44
-
-        // Test connection button
-        testButton = NSButton(title: "Test Connection", target: self, action: #selector(testConnection))
-        testButton.frame = NSRect(x: 20, y: y, width: 140, height: 28)
-        testButton.bezelStyle = .rounded
-        container.addSubview(testButton)
-
-        testResultLabel = NSTextField(labelWithString: "")
-        testResultLabel.frame = NSRect(x: 170, y: y + 4, width: 260, height: 22)
-        testResultLabel.textColor = .secondaryLabelColor
-        testResultLabel.font = NSFont.systemFont(ofSize: 11)
-        testResultLabel.lineBreakMode = .byTruncatingTail
-        container.addSubview(testResultLabel)
-
-        y -= 40
+        y -= 70
 
         // Custom prompt instructions
         addLabel("Custom instructions:", at: NSPoint(x: 20, y: y), in: container)
@@ -3323,61 +3291,6 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         return label
     }
 
-    private func populateModelPopup() {
-        modelPopup.removeAllItems()
-        let saved = Settings.shared.aiModel
-        modelPopup.addItem(withTitle: saved)
-        fetchOllamaModels()
-        modelPopup.selectItem(withTitle: saved)
-        updateOllamaStatus()
-    }
-
-    private func fetchOllamaModels() {
-        guard let url = URL(string: "http://localhost:11434/api/tags") else { return }
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
-            guard let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let models = json["models"] as? [[String: Any]] else {
-                if error != nil {
-                    DispatchQueue.main.async { self?.updateOllamaStatus() }
-                }
-                return
-            }
-            let names = models.compactMap { $0["name"] as? String }.sorted()
-            guard !names.isEmpty else { return }
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                let saved = self.modelPopup.selectedItem?.title ?? Settings.shared.aiModel
-                self.modelPopup.removeAllItems()
-                self.modelPopup.addItems(withTitles: names)
-                if self.modelPopup.item(withTitle: saved) == nil {
-                    self.modelPopup.addItem(withTitle: saved)
-                }
-                self.modelPopup.selectItem(withTitle: saved)
-            }
-        }.resume()
-    }
-
-    private func updateOllamaStatus() {
-        guard let url = URL(string: "http://localhost:11434/api/tags") else { return }
-        URLSession.shared.dataTask(with: url) { [weak self] _, response, error in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                if error == nil, let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                    self.ollamaStatusLabel.isHidden = true
-                    self.ollamaInstallButton.isHidden = true
-                } else {
-                    self.ollamaStatusLabel.stringValue = "Ollama not found"
-                    self.ollamaStatusLabel.textColor = .systemOrange
-                    self.ollamaStatusLabel.isHidden = false
-                    self.ollamaInstallButton.isHidden = false
-                    self.ollamaInstallButton.isEnabled = true
-                    self.ollamaInstallButton.title = "Install Ollama"
-                }
-            }
-        }.resume()
-    }
-
     private func updateDownloadButton() {
         let path = Settings.shared.whisperModelPath
         let exists = FileManager.default.fileExists(atPath: path)
@@ -3432,8 +3345,6 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         popoLabel?.stringValue = "5"
         clipboardCheckbox?.state = .on
         aiEnabledCheckbox?.state = .on
-        populateModelPopup()
-        testResultLabel?.stringValue = ""
         overlayEnabledCheckbox?.state = .on
         overlayAppNameCheckbox?.state = .on
         overlayAppIconCheckbox?.state = .on
@@ -3453,112 +3364,6 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
 
     @objc private func aiEnabledChanged() {
         Settings.shared.aiEnabled = aiEnabledCheckbox.state == .on
-    }
-
-    @objc private func modelChanged() {
-        if let title = modelPopup.selectedItem?.title {
-            Settings.shared.aiModel = title
-        }
-    }
-
-    @objc private func testConnection() {
-        testResultLabel.stringValue = "Testing..."
-        testResultLabel.textColor = .secondaryLabelColor
-
-        let client = OllamaClient()
-        client.testConnection { [weak self] success, message in
-            DispatchQueue.main.async {
-                self?.testResultLabel.stringValue = message
-                self?.testResultLabel.textColor = success ? .systemGreen : .systemRed
-            }
-        }
-    }
-
-    private func findOllamaBinary() -> String? {
-        // Check common install locations — no hardcoded brew dependency
-        let candidates = [
-            "/usr/local/bin/ollama",
-            "/opt/homebrew/bin/ollama",
-            NSHomeDirectory() + "/.ollama/bin/ollama",
-            "/Applications/Ollama.app/Contents/Resources/ollama"
-        ]
-        for path in candidates {
-            if FileManager.default.fileExists(atPath: path) { return path }
-        }
-        return nil
-    }
-
-    @objc private func installOllama() {
-        // Open ollama.com download page — no Homebrew dependency
-        if let url = URL(string: "https://ollama.com/download/mac") {
-            NSWorkspace.shared.open(url)
-        }
-        ollamaStatusLabel.stringValue = "Download Ollama from ollama.com, then reopen Settings"
-        ollamaStatusLabel.textColor = .secondaryLabelColor
-        ollamaStatusLabel.isHidden = false
-        ollamaInstallButton.title = "Check Again"
-        ollamaInstallButton.action = #selector(recheckOllama)
-    }
-
-    @objc private func recheckOllama() {
-        ollamaInstallButton.isEnabled = false
-        ollamaStatusLabel.stringValue = "Checking..."
-        ollamaStatusLabel.textColor = .secondaryLabelColor
-
-        // Check if Ollama server is now running
-        updateOllamaStatus()
-
-        // Also check if the binary exists now
-        if let ollamaPath = findOllamaBinary() {
-            // Ollama is installed — try to pull the default model
-            ollamaStatusLabel.stringValue = "Pulling llama3.2:3b model..."
-
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let pull = Process()
-                pull.executableURL = URL(fileURLWithPath: ollamaPath)
-                pull.arguments = ["pull", "llama3.2:3b"]
-                let pullPipe = Pipe()
-                pull.standardOutput = pullPipe
-                pull.standardError = pullPipe
-
-                do {
-                    try pull.run()
-                    pull.waitUntilExit()
-                } catch {
-                    DispatchQueue.main.async {
-                        self?.ollamaStatusLabel.stringValue = "Model pull failed: \(error.localizedDescription)"
-                        self?.ollamaStatusLabel.textColor = .systemRed
-                        self?.ollamaInstallButton.isEnabled = true
-                    }
-                    return
-                }
-
-                guard pull.terminationStatus == 0 else {
-                    DispatchQueue.main.async {
-                        self?.ollamaStatusLabel.stringValue = "Model pull failed"
-                        self?.ollamaStatusLabel.textColor = .systemRed
-                        self?.ollamaInstallButton.isEnabled = true
-                    }
-                    return
-                }
-
-                DispatchQueue.main.async {
-                    self?.ollamaStatusLabel.stringValue = "Ollama ready!"
-                    self?.ollamaStatusLabel.textColor = .systemGreen
-                    self?.ollamaInstallButton.isHidden = true
-                    self?.populateModelPopup()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                        self?.ollamaStatusLabel.isHidden = true
-                    }
-                }
-            }
-        } else {
-            ollamaStatusLabel.stringValue = "Ollama not found — install from ollama.com"
-            ollamaStatusLabel.textColor = .systemOrange
-            ollamaInstallButton.isEnabled = true
-            ollamaInstallButton.title = "Download Ollama"
-            ollamaInstallButton.action = #selector(installOllama)
-        }
     }
 
     @objc private func whisperModelChanged() {
@@ -3685,7 +3490,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     let inputMonitor = InputMonitor()
     let textInjector = TextInjector()
-    let ollamaClient = OllamaClient()
+    let llamaClient = LlamaClient()
     let overlayWindow = OverlayWindow()
 
     var popoTimer: Timer?
@@ -3914,11 +3719,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         // Preflight: ensure whisper model exists (auto-download if missing)
         ModelDownloadWindowController.shared.ensureModel { [weak self] in
-            // Ollama health check and warmup for local cleanup.
+            // AI model health check.
             if Settings.shared.aiEnabled {
-                self?.ollamaClient.healthCheck { [weak self] available in
+                self?.llamaClient.healthCheck { [weak self] available in
                     if available {
-                        self?.ollamaClient.warmup()
+                        self?.llamaClient.warmup()
                     }
                 }
             }
@@ -4695,7 +4500,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             }
 
             let context = AppContext.current()
-            ollamaClient.cleanupText(rawText, appContext: context) { [weak self] cleanedText in
+            llamaClient.cleanupText(rawText, appContext: context) { [weak self] cleanedText in
                 DispatchQueue.main.async {
                     self?.refocusAndInject(cleanedText)
                     self?.finishProcessing(text: cleanedText)
