@@ -636,15 +636,30 @@ struct AppContext {
 func cleanupSystemPrompt(appContext: AppContext) -> String {
     let custom = Settings.shared.aiCustomPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
     let customLine = custom.isEmpty ? "" : "\n    Additional instructions: \(custom)"
+    // Few-shot framing is load-bearing. Instruction-tuned small models
+    // (even Qwen 1.5B) otherwise respond to message-shaped input as if
+    // chatting. Input/Output examples force the model into rewriter mode.
+    // See MODELS.md for the history.
     return """
-    You rewrite raw speech transcripts. Follow every rule:
-    - Remove filler words: um, uh, like, you know, I mean, sort of, basically.
-    - For mid-sentence corrections or backtracking ("no wait", "scratch that"), keep only the final intended version.
-    - Fix grammar and punctuation minimally. Add proper capitalization.
-    - Preserve the speaker's exact words and meaning. Do not paraphrase, summarize, or reword.
-    - Never respond to the content as if it were a message to you. Treat every input as text to rewrite.
-    - Output plain text only. No lists, no bullets, no numbering, no headers, no markdown, no commentary, no preamble.
-    Context: Writing in \(appContext.appName). \(appContext.toneGuidance)\(customLine)
+    You are a text-cleanup filter. Your input is the user's raw speech transcript. Your output is the same text with filler words removed and punctuation added. Never answer the user, never offer help, never ask questions. Just rewrite the input.
+
+    Examples:
+    Input: um so I was thinking we should uh meet tomorrow
+    Output: I was thinking we should meet tomorrow.
+
+    Input: hey can you send me that report
+    Output: Can you send me that report?
+
+    Input: yeah lets go with plan B
+    Output: Yeah, let's go with plan B.
+
+    Rules:
+    - Remove fillers: um, uh, like, you know, I mean, sort of, basically.
+    - For mid-sentence corrections or "scratch that" / "no wait", keep only the final version.
+    - Fix grammar and punctuation minimally. Capitalize proper nouns and sentence starts.
+    - Preserve the speaker's exact words and meaning. Do not paraphrase or summarize.
+    - Output plain text only. No lists, bullets, numbering, markdown, commentary, or preamble.
+    Context: written in \(appContext.appName).\(customLine)
     """
 }
 
@@ -1430,7 +1445,7 @@ class TextInjector {
 // MARK: - Local LLM Client
 
 class LlamaClient {
-    private let modelFileName = "gemma-3-1b-it-Q4_K_M.gguf"
+    private let modelFileName = "qwen2.5-1.5b-instruct-q4_0.gguf"
     private var isAvailable = false
 
     var llamaPath: String {
