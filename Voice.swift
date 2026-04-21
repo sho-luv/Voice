@@ -233,6 +233,13 @@ class Settings {
         set { defaults.set(newValue, forKey: "whisperModel") }
     }
 
+    // Free-text user vocabulary (names, acronyms, technical terms) injected
+    // into whisper's --prompt so the decoder biases toward these words.
+    var customVocabulary: String {
+        get { defaults.string(forKey: "customVocabulary") ?? "" }
+        set { defaults.set(newValue, forKey: "customVocabulary") }
+    }
+
     var whisperModelPath: String {
         // 1. Check app bundle (self-contained DMG)
         let bundled = (Bundle.main.resourcePath ?? "") + "/ggml-\(whisperModel).bin"
@@ -1424,7 +1431,7 @@ class TextInjector {
 // MARK: - Local LLM Client
 
 class LlamaClient {
-    private let modelFileName = "qwen2.5-0.5b-instruct-q4_0.gguf"
+    private let modelFileName = "qwen2.5-1.5b-instruct-q4_0.gguf"
     private var isAvailable = false
 
     var llamaPath: String {
@@ -1510,7 +1517,12 @@ class LlamaClient {
 
             do {
                 try process.run()
-                process.waitUntilExit()
+                // Qwen 0.5B on M-series runs in 1-3s; 20s covers the worst case.
+                let completed = runWithTimeout(process, timeout: 20)
+                if !completed {
+                    completion(nil)
+                    return
+                }
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 var output = String(data: data, encoding: .utf8)?
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -2582,6 +2594,7 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
     // AI tab controls
     private var aiEnabledCheckbox: NSButton!
     private var aiCustomPromptField: NSTextField!
+    private var customVocabularyField: NSTextField!
 
     // Audio tab controls
     private var micPopup: NSPopUpButton!
@@ -2883,9 +2896,9 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
     private func makeAITab() -> NSTabViewItem {
         let item = NSTabViewItem(identifier: "ai")
         item.label = "AI"
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 450, height: 300))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 450, height: 400))
 
-        var y: CGFloat = 260
+        var y: CGFloat = 360
 
         // Local AI text cleanup toggle
         aiEnabledCheckbox = NSButton(checkboxWithTitle: "AI text cleanup", target: self, action: #selector(aiEnabledChanged))
@@ -2924,6 +2937,29 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         aiCustomPromptField.cell?.isScrollable = true
         aiCustomPromptField.delegate = self
         container.addSubview(aiCustomPromptField)
+
+        y -= 72
+
+        // Custom transcription vocabulary — biases whisper toward these words
+        addLabel("Custom vocabulary:", at: NSPoint(x: 20, y: y), in: container)
+        y -= 4
+        let vocabHint = NSTextField(labelWithString: "Names, acronyms, technical terms — helps whisper recognize your jargon")
+        vocabHint.frame = NSRect(x: 20, y: y - 16, width: 410, height: 14)
+        vocabHint.textColor = .tertiaryLabelColor
+        vocabHint.font = NSFont.systemFont(ofSize: 10)
+        container.addSubview(vocabHint)
+
+        y -= 34
+
+        customVocabularyField = NSTextField(string: Settings.shared.customVocabulary)
+        customVocabularyField.frame = NSRect(x: 20, y: y - 40, width: 410, height: 60)
+        customVocabularyField.placeholderString = "Kubernetes, kubectl, faradaysoft, GGUF, whisper.cpp, ..."
+        customVocabularyField.font = NSFont.systemFont(ofSize: 12)
+        customVocabularyField.usesSingleLineMode = false
+        customVocabularyField.cell?.wraps = true
+        customVocabularyField.cell?.isScrollable = true
+        customVocabularyField.delegate = self
+        container.addSubview(customVocabularyField)
 
         item.view = container
         return item
@@ -3118,6 +3154,9 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         }
         if let field = obj.object as? NSTextField, field === aiCustomPromptField {
             Settings.shared.aiCustomPrompt = field.stringValue
+        }
+        if let field = obj.object as? NSTextField, field === customVocabularyField {
+            Settings.shared.customVocabulary = field.stringValue
         }
     }
 
@@ -3459,6 +3498,110 @@ func writeWAVHeader(to handle: FileHandle, dataSize: UInt32) {
     header.append(Data(bytes: &dataChunkSize, count: 4))
     handle.seek(toFileOffset: 0)
     handle.write(header)
+}
+
+// Peak-normalize a 16kHz mono Int16 PCM WAV file in place.
+// Raises quiet / mumbled speech to a consistent level before handing it to
+// Whisper, which performs dramatically better on normalized input.
+// Returns true on success; false leaves the file untouched.
+@discardableResult
+func normalizeWavFile(at path: String) -> Bool {
+    guard var data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+          data.count > 44 else { return false }
+
+    let headerSize = 44
+    let sampleBytes = data.count - headerSize
+    let sampleCount = sampleBytes / 2
+    guard sampleCount > 0 else { return false }
+
+    var peak: Int32 = 0
+    var rmsAccum: Double = 0
+    data.withUnsafeBytes { raw in
+        let base = raw.baseAddress!.advanced(by: headerSize).assumingMemoryBound(to: Int16.self)
+        for i in 0..<sampleCount {
+            let s = Int32(base[i])
+            let a = abs(s)
+            if a > peak { peak = a }
+            rmsAccum += Double(s) * Double(s)
+        }
+    }
+
+    let rms = sqrt(rmsAccum / Double(sampleCount)) / 32768.0
+    // Skip if too quiet overall (likely no speech) — normalizing pure noise
+    // just amplifies hiss and tanks whisper accuracy.
+    guard rms > 0.003, peak > 0 else { return false }
+
+    // Target -3 dBFS peak (~23170 of 32767). Cap gain at 20x so a single loud
+    // sample doesn't prevent quiet speech from being boosted.
+    let target: Double = 23170
+    var gain = target / Double(peak)
+    if gain < 1.0 { return false }   // already loud enough, leave it alone
+    if gain > 20.0 { gain = 20.0 }
+
+    data.withUnsafeMutableBytes { raw in
+        let base = raw.baseAddress!.advanced(by: headerSize).assumingMemoryBound(to: Int16.self)
+        for i in 0..<sampleCount {
+            var v = Double(base[i]) * gain
+            if v > 32767 { v = 32767 }
+            if v < -32768 { v = -32768 }
+            base[i] = Int16(v)
+        }
+    }
+
+    do {
+        try data.write(to: URL(fileURLWithPath: path))
+        return true
+    } catch {
+        return false
+    }
+}
+
+// Run a Process and wait up to `timeout` seconds. If it doesn't exit in time,
+// terminate it. Returns true if it exited normally within the window.
+@discardableResult
+func runWithTimeout(_ process: Process, timeout: TimeInterval) -> Bool {
+    let sem = DispatchSemaphore(value: 0)
+    var terminatedBy = "normal"
+    process.terminationHandler = { _ in sem.signal() }
+    let result = sem.wait(timeout: .now() + timeout)
+    if result == .timedOut {
+        terminatedBy = "timeout"
+        if process.isRunning {
+            process.terminate()
+            // Give it a brief grace period to flush pipes after SIGTERM.
+            _ = sem.wait(timeout: .now() + 0.5)
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+                _ = sem.wait(timeout: .now() + 0.5)
+            }
+        }
+        NSLog("Voice: process killed after %.1fs timeout", timeout)
+    }
+    process.terminationHandler = nil
+    return terminatedBy == "normal"
+}
+
+// Build a short initial prompt for whisper-cli that biases the decoder toward
+// the active app's vocabulary — e.g. code terms in Xcode, casual tone in
+// Messages. Whisper uses this as prior context without transcribing it.
+func whisperContextPrompt(from context: AppContext) -> String {
+    var parts: [String] = []
+    let app = context.appName.trimmingCharacters(in: .whitespaces)
+    if !app.isEmpty && app != "Unknown" {
+        parts.append("Dictating into \(app).")
+    }
+    let title = context.windowTitle.trimmingCharacters(in: .whitespaces)
+    if !title.isEmpty {
+        // Cap window title length — whisper prompts over ~200 tokens degrade.
+        let clipped = title.count > 120 ? String(title.prefix(120)) : title
+        parts.append("Window: \(clipped).")
+    }
+    let vocab = Settings.shared.customVocabulary.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !vocab.isEmpty {
+        let clipped = vocab.count > 300 ? String(vocab.prefix(300)) : vocab
+        parts.append("Vocabulary: \(clipped).")
+    }
+    return parts.joined(separator: " ")
 }
 
 // MARK: - App Delegate
@@ -3975,7 +4118,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
 
         var tapCallCount = 0
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] buffer, _ in
+        let tapBlock: AVAudioNodeTapBlock = { [weak self] buffer, _ in
             guard let self = self else { return }
             tapCallCount += 1
             // Convert to 16kHz mono Int16
@@ -4030,6 +4173,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 }
             }
         }
+        // installTap can raise ObjC exceptions on mic disconnect / format
+        // mismatch — catch them instead of crashing with SIGABRT.
+        let tapOK = VoiceExceptionCatcher.run {
+            inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat, block: tapBlock)
+        }
+        if !tapOK {
+            appState = .idle
+            inputMonitor.setRecording(false)
+            updateIcon()
+            hideOverlay()
+            audioFileHandle?.closeFile()
+            audioFileHandle = nil
+            if let f = audioFile { cleanup(f) }
+            audioFile = nil
+            showNotification(title: "Voice", body: "Microphone unavailable — try again")
+            return
+        }
 
         engine.prepare()
         do {
@@ -4081,7 +4241,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
 
         var tapCallCount = 0
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] buffer, _ in
+        let tapBlock: AVAudioNodeTapBlock = { [weak self] buffer, _ in
             guard let self = self else { return }
             tapCallCount += 1
             let ratio = 16000.0 / hwFormat.sampleRate
@@ -4106,6 +4266,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 let rms = sqrt(sum / Float(max(frameCount, 1)))
                 DispatchQueue.main.async { self.currentAudioLevel = rms }
             }
+        }
+        let tapOK = VoiceExceptionCatcher.run {
+            inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat, block: tapBlock)
+        }
+        if !tapOK {
+            NSLog("Voice: restartRecordingEngine — installTap raised, giving up")
+            return
         }
 
         engine.prepare()
@@ -4280,7 +4447,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             return
         }
 
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] buffer, _ in
+        let tapBlock: AVAudioNodeTapBlock = { [weak self] buffer, _ in
             guard let self = self else { return }
             let ratio = 16000.0 / hwFormat.sampleRate
             let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio)
@@ -4324,6 +4491,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                     }
                 }
             }
+        }
+        let tapOK = VoiceExceptionCatcher.run {
+            inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat, block: tapBlock)
+        }
+        if !tapOK {
+            audioFileHandle?.closeFile()
+            audioFileHandle = nil
+            appState = .idle
+            inputMonitor.setRecording(false)
+            inputMonitor.setPopo(false)
+            updateIcon()
+            hideOverlay()
+            showNotification(title: "Voice", body: "Microphone unavailable — try again")
+            return
         }
 
         engine.prepare()
@@ -4431,15 +4612,32 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             return
         }
 
+        // Capture active-app context once and reuse for both whisper biasing
+        // and the downstream LLM cleanup pass.
+        let appContext = AppContext.current()
+
+        // Peak-normalize the WAV so quiet/mumbled speech is brought up to a
+        // consistent level before whisper sees it. This is the single biggest
+        // quality win for low-volume input and costs ~10ms.
+        normalizeWavFile(at: audioFile)
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: whisperPath)
-        process.arguments = [
+        var whisperArgs: [String] = [
             "--model", Settings.shared.whisperModelPath,
             "--file", audioFile,
             "--no-timestamps",
             "--threads", "8",
-            "--language", "en"
+            "--language", "en",
+            // Wider beam than default 5 — markedly better on ambiguous /
+            // whispered audio at ~2x decode cost (still sub-second on turbo).
+            "--beam-size", "8"
         ]
+        let ctxPrompt = whisperContextPrompt(from: appContext)
+        if !ctxPrompt.isEmpty {
+            whisperArgs.append(contentsOf: ["--prompt", ctxPrompt])
+        }
+        process.arguments = whisperArgs
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -4447,7 +4645,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         do {
             try process.run()
-            process.waitUntilExit()
+            // Whisper turbo on 30s clips is sub-second on Apple Silicon.
+            // 60s is a generous watchdog against a wedged binary.
+            let completed = runWithTimeout(process, timeout: 60)
+            if !completed {
+                finishProcessing(error: "Transcription timed out")
+                cleanup(audioFile)
+                return
+            }
 
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             var rawText = String(data: data, encoding: .utf8) ?? ""
@@ -4499,8 +4704,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 return
             }
 
-            let context = AppContext.current()
-            llamaClient.cleanupText(rawText, appContext: context) { [weak self] cleanedText in
+            llamaClient.cleanupText(rawText, appContext: appContext) { [weak self] cleanedText in
                 DispatchQueue.main.async {
                     self?.refocusAndInject(cleanedText)
                     self?.finishProcessing(text: cleanedText)

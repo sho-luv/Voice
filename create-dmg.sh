@@ -65,7 +65,10 @@ fi
 
 # --- Compile ---
 echo "Compiling..."
-swiftc -O -o "${SCRIPT_DIR}/Voice" "${SCRIPT_DIR}/Voice.swift" \
+swiftc -O -o "${SCRIPT_DIR}/Voice" \
+    "${SCRIPT_DIR}/Voice.swift" \
+    "${SCRIPT_DIR}/VoiceExceptionCatcher.m" \
+    -import-objc-header "${SCRIPT_DIR}/Voice-Bridging-Header.h" \
     -framework Cocoa -framework ApplicationServices \
     -framework UserNotifications -framework AVFoundation \
     -framework CoreAudio \
@@ -209,7 +212,7 @@ else
 fi
 
 # LLM model for AI text cleanup
-LLAMA_MODEL_FILE="${HOME}/Library/Application Support/Voice/Models/qwen2.5-0.5b-instruct-q4_0.gguf"
+LLAMA_MODEL_FILE="${HOME}/Library/Application Support/Voice/Models/qwen2.5-1.5b-instruct-q4_0.gguf"
 if [[ -f "${LLAMA_MODEL_FILE}" ]]; then
     echo "  LLM model: $(basename "${LLAMA_MODEL_FILE}") ($(du -h "${LLAMA_MODEL_FILE}" | cut -f1))"
     cp "${LLAMA_MODEL_FILE}" "${APP_DIR}/Resources/"
@@ -260,27 +263,31 @@ else
     echo "  Signed with: ${CERT}"
 fi
 
-# --- Create DMG ---
+# --- Create DMG (polished install UX via `create-dmg`) ---
+# Requires: brew install create-dmg
 echo "Creating DMG..."
 hdiutil detach /Volumes/Voice 2>/dev/null || true
-STAGING="${SCRIPT_DIR}/.dmg-staging"
-rm -rf "$STAGING" "${SCRIPT_DIR}/${DMG_NAME}"
-mkdir -p "$STAGING"
-cp -R "${SCRIPT_DIR}/Voice.app" "$STAGING/"
-ln -s /Applications "$STAGING/Applications"
+rm -f "${SCRIPT_DIR}/${DMG_NAME}"
 
-HYBRID_TMP="${SCRIPT_DIR}/.voice-hybrid"
-rm -f "${HYBRID_TMP}.cdr" "${HYBRID_TMP}.cdr.dmg"
-hdiutil makehybrid -o "${HYBRID_TMP}.cdr" \
-    -hfs -hfs-volume-name "Voice" \
-    "$STAGING/"
-HYBRID_FILE="${HYBRID_TMP}.cdr"
-[[ -f "${HYBRID_FILE}.dmg" ]] && HYBRID_FILE="${HYBRID_FILE}.dmg"
-hdiutil convert "$HYBRID_FILE" -format UDZO \
-    -imagekey zlib-level=9 \
-    -o "${SCRIPT_DIR}/${DMG_NAME}"
-rm -f "${HYBRID_TMP}.cdr" "${HYBRID_TMP}.cdr.dmg"
-rm -rf "$STAGING"
+if ! command -v create-dmg &>/dev/null; then
+    echo "Error: create-dmg not found. Install with: brew install create-dmg" >&2
+    exit 1
+fi
+
+# Background is 1320x800 @2x → window is 660x400 @1x. Arrow centered at y=190.
+# Voice.app icon sits left of arrow start; Applications alias sits right of arrow end.
+create-dmg \
+    --volname "Voice ${VERSION}" \
+    --background "${SCRIPT_DIR}/dmg-background.png" \
+    --window-pos 200 120 \
+    --window-size 660 400 \
+    --icon-size 100 \
+    --icon "Voice.app" 175 190 \
+    --app-drop-link 485 190 \
+    --hide-extension "Voice.app" \
+    --hdiutil-quiet \
+    "${SCRIPT_DIR}/${DMG_NAME}" \
+    "${SCRIPT_DIR}/Voice.app"
 
 # --- Sign the DMG ---
 if [[ "$CERT" != "-" ]]; then
