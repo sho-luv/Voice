@@ -27,6 +27,7 @@ jobs:
           mkdir -p /tmp/voice-module-cache
           swiftc -module-cache-path /tmp/voice-module-cache \
             -typecheck Voice.swift \
+            -import-objc-header Voice-Bridging-Header.h \
             -framework Cocoa \
             -framework ApplicationServices \
             -framework UserNotifications \
