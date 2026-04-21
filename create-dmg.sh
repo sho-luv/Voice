@@ -212,7 +212,7 @@ else
 fi
 
 # LLM model for AI text cleanup
-LLAMA_MODEL_FILE="${HOME}/Library/Application Support/Voice/Models/qwen2.5-0.5b-instruct-q4_0.gguf"
+LLAMA_MODEL_FILE="${HOME}/Library/Application Support/Voice/Models/gemma-3-1b-it-Q4_K_M.gguf"
 if [[ -f "${LLAMA_MODEL_FILE}" ]]; then
     echo "  LLM model: $(basename "${LLAMA_MODEL_FILE}") ($(du -h "${LLAMA_MODEL_FILE}" | cut -f1))"
     cp "${LLAMA_MODEL_FILE}" "${APP_DIR}/Resources/"
