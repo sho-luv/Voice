@@ -20,8 +20,11 @@ private enum ObfuscatedStrings {
     // Generated with: python3 -c "k=0xAB; print([hex(b ^ k) for b in b'<string>'])"
 
     static var checkoutURL: String {
-        // "https://faradaysoft.lemonsqueezy.com/checkout/buy/2617c440-f8d4-49c7-b6fd-4cbb15ed95fd"
-        let b: [UInt8] = [0xc3, 0xdf, 0xdf, 0xdb, 0xd8, 0x91, 0x84, 0x84, 0xcd, 0xca, 0xd9, 0xca, 0xcf, 0xca, 0xd2, 0xd8, 0xc4, 0xcd, 0xdf, 0x85, 0xc7, 0xce, 0xc6, 0xc4, 0xc5, 0xd8, 0xda, 0xde, 0xce, 0xce, 0xd1, 0xd2, 0x85, 0xc8, 0xc4, 0xc6, 0x84, 0xc8, 0xc3, 0xce, 0xc8, 0xc0, 0xc4, 0xde, 0xdf, 0x84, 0xc9, 0xde, 0xd2, 0x84, 0x99, 0x9d, 0x9a, 0x9c, 0xc8, 0x9f, 0x9f, 0x9b, 0x86, 0xcd, 0x93, 0xcf, 0x9f, 0x86, 0x9f, 0x92, 0xc8, 0x9c, 0x86, 0xc9, 0x9d, 0xcd, 0xcf, 0x86, 0x9f, 0xc8, 0xc9, 0xc9, 0x9a, 0x9e, 0xce, 0xcf, 0x92, 0x9e, 0xcd, 0xcf]
+        // "https://faradaysoft.lemonsqueezy.com/checkout/buy/34d167b8-e5ef-4850-8d4c-0f1f0a32759b"
+        // LemonSqueezy product 920798. Single checkout presents both $5/mo and $39/yr options
+        // plus a 14-day free trial. Previous UUID (2617c440-...) pointed at the retired product
+        // 912013 which had zero sales attached.
+        let b: [UInt8] = [0xc3, 0xdf, 0xdf, 0xdb, 0xd8, 0x91, 0x84, 0x84, 0xcd, 0xca, 0xd9, 0xca, 0xcf, 0xca, 0xd2, 0xd8, 0xc4, 0xcd, 0xdf, 0x85, 0xc7, 0xce, 0xc6, 0xc4, 0xc5, 0xd8, 0xda, 0xde, 0xce, 0xce, 0xd1, 0xd2, 0x85, 0xc8, 0xc4, 0xc6, 0x84, 0xc8, 0xc3, 0xce, 0xc8, 0xc0, 0xc4, 0xde, 0xdf, 0x84, 0xc9, 0xde, 0xd2, 0x84, 0x98, 0x9f, 0xcf, 0x9a, 0x9d, 0x9c, 0xc9, 0x93, 0x86, 0xce, 0x9e, 0xce, 0xcd, 0x86, 0x9f, 0x93, 0x9e, 0x9b, 0x86, 0x93, 0xcf, 0x9f, 0xc8, 0x86, 0x9b, 0xcd, 0x9a, 0xcd, 0x9b, 0xca, 0x98, 0x99, 0x9c, 0x9e, 0x92, 0xc9]
         return decode(b, key: 0xAB)
     }
 
@@ -231,6 +234,13 @@ class Settings {
     var whisperModel: String {
         get { defaults.string(forKey: "whisperModel") ?? "large-v3-turbo-q5_0" }
         set { defaults.set(newValue, forKey: "whisperModel") }
+    }
+
+    // Free-text user vocabulary (names, acronyms, technical terms) injected
+    // into whisper's --prompt so the decoder biases toward these words.
+    var customVocabulary: String {
+        get { defaults.string(forKey: "customVocabulary") ?? "" }
+        set { defaults.set(newValue, forKey: "customVocabulary") }
     }
 
     var whisperModelPath: String {
@@ -629,16 +639,30 @@ struct AppContext {
 func cleanupSystemPrompt(appContext: AppContext) -> String {
     let custom = Settings.shared.aiCustomPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
     let customLine = custom.isEmpty ? "" : "\n    Additional instructions: \(custom)"
+    // Few-shot framing is load-bearing. Instruction-tuned small models
+    // (even Qwen 1.5B) otherwise respond to message-shaped input as if
+    // chatting. Input/Output examples force the model into rewriter mode.
+    // See MODELS.md for the history.
     return """
-    You are a speech-to-text cleanup assistant. Your ONLY job is to clean up raw speech transcription:
-    1. Remove filler words (um, uh, like, you know, I mean, sort of, basically)
-    2. Fix grammar and punctuation
-    3. Handle mid-sentence corrections -- keep only the final version
-    4. Handle backtracking ("scratch that", "no wait") -- discard preceding clause
-    5. Add proper capitalization
-    6. Preserve the speaker's meaning exactly -- do NOT paraphrase
-    7. Output ONLY the cleaned text. No commentary.
-    Context: Writing in \(appContext.appName). \(appContext.toneGuidance)\(customLine)
+    You are a text-cleanup filter. Your input is the user's raw speech transcript. Your output is the same text with filler words removed and punctuation added. Never answer the user, never offer help, never ask questions. Just rewrite the input.
+
+    Examples:
+    Input: um so I was thinking we should uh meet tomorrow
+    Output: I was thinking we should meet tomorrow.
+
+    Input: hey can you send me that report
+    Output: Can you send me that report?
+
+    Input: yeah lets go with plan B
+    Output: Yeah, let's go with plan B.
+
+    Rules:
+    - Remove fillers: um, uh, like, you know, I mean, sort of, basically.
+    - For mid-sentence corrections or "scratch that" / "no wait", keep only the final version.
+    - Fix grammar and punctuation minimally. Capitalize proper nouns and sentence starts.
+    - Preserve the speaker's exact words and meaning. Do not paraphrase or summarize.
+    - Output plain text only. No lists, bullets, numbering, markdown, commentary, or preamble.
+    Context: written in \(appContext.appName).\(customLine)
     """
 }
 
@@ -1421,47 +1445,38 @@ class TextInjector {
     }
 }
 
-// MARK: - Ollama Client
+// MARK: - Local LLM Client
 
-class OllamaClient {
-    let baseURL = "http://localhost:11434"
+class LlamaClient {
+    private let modelFileName = "qwen2.5-1.5b-instruct-q4_0.gguf"
     private var isAvailable = false
 
-    var model: String { Settings.shared.aiModel }
+    var llamaPath: String {
+        let bundled = Bundle.main.resourcePath! + "/llama-completion"
+        if FileManager.default.fileExists(atPath: bundled) { return bundled }
+        for path in ["/opt/homebrew/bin/llama-completion", "/usr/local/bin/llama-completion"] {
+            if FileManager.default.fileExists(atPath: path) { return path }
+        }
+        return bundled
+    }
+
+    var modelPath: String {
+        // 1. Check app bundle (self-contained DMG)
+        let bundled = (Bundle.main.resourcePath ?? "") + "/\(modelFileName)"
+        if FileManager.default.fileExists(atPath: bundled) { return bundled }
+        // 2. Fall back to Application Support
+        return NSHomeDirectory() + "/Library/Application Support/Voice/Models/\(modelFileName)"
+    }
 
     func healthCheck(completion: @escaping (Bool) -> Void) {
-        guard let url = URL(string: "\(baseURL)/api/tags") else {
-            completion(false)
-            return
-        }
-
-        URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
-            guard let self = self, error == nil,
-                  let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200 else {
-                self?.isAvailable = false
-                completion(false)
-                return
-            }
-            self.isAvailable = true
-            completion(true)
-        }.resume()
+        let available = FileManager.default.fileExists(atPath: llamaPath)
+                     && FileManager.default.fileExists(atPath: modelPath)
+        isAvailable = available
+        completion(available)
     }
 
     func warmup() {
-        guard let url = URL(string: "\(baseURL)/api/generate") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let body: [String: Any] = [
-            "model": model,
-            "prompt": "Hello",
-            "stream": false,
-            "options": ["num_predict": 1]
-        ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        URLSession.shared.dataTask(with: request) { _, _, _ in }.resume()
+        // No warmup needed — model loads on demand per invocation
     }
 
     func cleanupText(_ text: String, appContext: AppContext, completion: @escaping (String) -> Void) {
@@ -1481,45 +1496,65 @@ class OllamaClient {
     func testConnection(completion: @escaping (Bool, String) -> Void) {
         healthCheck { available in
             if available {
-                completion(true, "Ollama is running, model: \(self.model)")
+                completion(true, "Built-in AI model ready")
             } else {
-                completion(false, "Cannot connect to Ollama at localhost:11434")
+                var missing: [String] = []
+                if !FileManager.default.fileExists(atPath: self.llamaPath) { missing.append("llama-completion binary") }
+                if !FileManager.default.fileExists(atPath: self.modelPath) { missing.append("AI model") }
+                completion(false, "Missing: \(missing.joined(separator: ", "))")
             }
         }
     }
 
     private func generate(system: String, prompt: String, completion: @escaping (String?) -> Void) {
-        guard let url = URL(string: "\(baseURL)/api/generate") else {
-            completion(nil)
-            return
-        }
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: llamaPath)
+            process.arguments = [
+                "-m", modelPath,
+                "-sys", system,
+                "-p", prompt,
+                "-n", "2048",
+                "--temp", "0.1",
+                "-ngl", "99",
+                "--no-display-prompt"
+            ]
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 30
-
-        let body: [String: Any] = [
-            "model": model,
-            "system": system,
-            "prompt": prompt,
-            "stream": false,
-            "options": ["temperature": 0.1, "num_predict": 2048]
-        ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            guard error == nil,
-                  let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let responseText = json["response"] as? String else {
-                completion(nil)
-                return
+            // Point to bundled ggml backend plugins if running from app bundle
+            var env = ProcessInfo.processInfo.environment
+            let bundleFrameworks = Bundle.main.bundlePath + "/Contents/Frameworks/llama"
+            if FileManager.default.fileExists(atPath: bundleFrameworks) {
+                env["GGML_BACKEND_PATH"] = bundleFrameworks + "/backends"
             }
+            process.environment = env
 
-            let cleaned = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
-            completion(cleaned.isEmpty ? nil : cleaned)
-        }.resume()
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = FileHandle.nullDevice
+
+            do {
+                try process.run()
+                // Qwen 0.5B on M-series runs in 1-3s; 20s covers the worst case.
+                let completed = runWithTimeout(process, timeout: 20)
+                if !completed {
+                    completion(nil)
+                    return
+                }
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                var output = String(data: data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                // Strip trailing "> EOF by user" artifact from llama-completion
+                if output.hasSuffix("> EOF by user") {
+                    output = output.replacingOccurrences(of: "\n> EOF by user", with: "")
+                        .replacingOccurrences(of: "> EOF by user", with: "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                completion(output.isEmpty ? nil : output)
+            } catch {
+                NSLog("Voice: llama-completion failed: %@", error.localizedDescription)
+                completion(nil)
+            }
+        }
     }
 }
 
@@ -1832,6 +1867,176 @@ class LicenseExpiryWindowController {
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         window = w
+    }
+}
+
+// MARK: - Model Download Window
+
+class ModelDownloadWindowController: NSObject, URLSessionDownloadDelegate {
+    static let shared = ModelDownloadWindowController()
+
+    private var window: NSWindow?
+    private var progressBar: NSProgressIndicator?
+    private var statusLabel: NSTextField?
+    private var downloadTask: URLSessionDownloadTask?
+    private var completion: (() -> Void)?
+
+    func ensureModel(completion: @escaping () -> Void) {
+        // Already have the model — nothing to do
+        if FileManager.default.fileExists(atPath: Settings.shared.whisperModelPath) {
+            completion()
+            return
+        }
+        // Check bundled model in app Resources
+        let bundled = (Bundle.main.resourcePath ?? "") + "/ggml-\(Settings.shared.whisperModel).bin"
+        if FileManager.default.fileExists(atPath: bundled) {
+            completion()
+            return
+        }
+        self.completion = completion
+        showWindow()
+        startDownload()
+    }
+
+    private func showWindow() {
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 160),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        w.title = "Downloading Speech Model"
+        w.center()
+        w.isReleasedWhenClosed = false
+        w.level = .floating
+
+        guard let contentView = w.contentView else { return }
+
+        let title = NSTextField(labelWithString: "Downloading speech recognition model...")
+        title.font = NSFont.boldSystemFont(ofSize: 14)
+        title.frame = NSRect(x: 30, y: 110, width: 360, height: 22)
+        contentView.addSubview(title)
+
+        let subtitle = NSTextField(wrappingLabelWithString: "This is a one-time download (~547 MB). Voice needs this model to transcribe speech locally on your Mac.")
+        subtitle.font = NSFont.systemFont(ofSize: 12)
+        subtitle.textColor = .secondaryLabelColor
+        subtitle.frame = NSRect(x: 30, y: 68, width: 360, height: 36)
+        contentView.addSubview(subtitle)
+
+        let bar = NSProgressIndicator(frame: NSRect(x: 30, y: 44, width: 360, height: 20))
+        bar.style = .bar
+        bar.isIndeterminate = false
+        bar.minValue = 0
+        bar.maxValue = 100
+        bar.doubleValue = 0
+        contentView.addSubview(bar)
+        progressBar = bar
+
+        let status = NSTextField(labelWithString: "Starting download...")
+        status.font = NSFont.systemFont(ofSize: 11)
+        status.textColor = .secondaryLabelColor
+        status.frame = NSRect(x: 30, y: 18, width: 360, height: 18)
+        contentView.addSubview(status)
+        statusLabel = status
+
+        window = w
+        NSApp.setActivationPolicy(.regular)
+        w.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func startDownload() {
+        let modelName = Settings.shared.whisperModel
+        let urlString = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-\(modelName).bin"
+        guard let url = URL(string: urlString) else {
+            statusLabel?.stringValue = "Error: invalid download URL"
+            return
+        }
+
+        let modelDir = NSHomeDirectory() + "/Library/Application Support/Voice/Models"
+        try? FileManager.default.createDirectory(atPath: modelDir, withIntermediateDirectories: true)
+
+        let config = URLSessionConfiguration.default
+        let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+        downloadTask = session.downloadTask(with: url)
+        downloadTask?.resume()
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
+                    totalBytesExpectedToWrite: Int64) {
+        DispatchQueue.main.async {
+            if totalBytesExpectedToWrite > 0 {
+                let pct = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite) * 100
+                self.progressBar?.doubleValue = pct
+                let mbDone = Double(totalBytesWritten) / 1_048_576
+                let mbTotal = Double(totalBytesExpectedToWrite) / 1_048_576
+                self.statusLabel?.stringValue = String(format: "%.0f / %.0f MB (%.0f%%)", mbDone, mbTotal, pct)
+            } else {
+                let mbDone = Double(totalBytesWritten) / 1_048_576
+                self.statusLabel?.stringValue = String(format: "%.0f MB downloaded...", mbDone)
+            }
+        }
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didFinishDownloadingTo location: URL) {
+        let modelName = Settings.shared.whisperModel
+        let modelDir = NSHomeDirectory() + "/Library/Application Support/Voice/Models"
+        let dest = "\(modelDir)/ggml-\(modelName).bin"
+
+        do {
+            if FileManager.default.fileExists(atPath: dest) {
+                try FileManager.default.removeItem(atPath: dest)
+            }
+            try FileManager.default.moveItem(at: location, to: URL(fileURLWithPath: dest))
+            DispatchQueue.main.async {
+                self.statusLabel?.stringValue = "Download complete!"
+                self.progressBar?.doubleValue = 100
+                // Brief pause so user sees "complete", then close
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    self.window?.close()
+                    self.window = nil
+                    // Revert to accessory if onboarding is done
+                    if Settings.shared.onboardingComplete {
+                        NSApp.setActivationPolicy(.accessory)
+                    }
+                    self.completion?()
+                    self.completion = nil
+                }
+            }
+        } catch {
+            DispatchQueue.main.async {
+                self.statusLabel?.stringValue = "Error: \(error.localizedDescription)"
+                self.statusLabel?.textColor = .systemRed
+            }
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard let error = error else { return }
+        DispatchQueue.main.async {
+            self.statusLabel?.stringValue = "Download failed: \(error.localizedDescription)"
+            self.statusLabel?.textColor = .systemRed
+            // Add retry button
+            let retryBtn = NSButton(frame: NSRect(x: 160, y: 18, width: 100, height: 24))
+            retryBtn.title = "Retry"
+            retryBtn.bezelStyle = .rounded
+            retryBtn.target = self
+            retryBtn.action = #selector(self.retryDownload)
+            self.window?.contentView?.addSubview(retryBtn)
+        }
+    }
+
+    @objc private func retryDownload() {
+        statusLabel?.textColor = .secondaryLabelColor
+        statusLabel?.stringValue = "Retrying..."
+        progressBar?.doubleValue = 0
+        // Remove retry button
+        for v in window?.contentView?.subviews ?? [] {
+            if let btn = v as? NSButton, btn.title == "Retry" { btn.removeFromSuperview() }
+        }
+        startDownload()
     }
 }
 
@@ -2405,12 +2610,8 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
 
     // AI tab controls
     private var aiEnabledCheckbox: NSButton!
-    private var modelPopup: NSPopUpButton!
-    private var ollamaStatusLabel: NSTextField!
-    private var ollamaInstallButton: NSButton!
-    private var testButton: NSButton!
-    private var testResultLabel: NSTextField!
     private var aiCustomPromptField: NSTextField!
+    private var customVocabularyField: NSTextField!
 
     // Audio tab controls
     private var micPopup: NSPopUpButton!
@@ -2712,59 +2913,26 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
     private func makeAITab() -> NSTabViewItem {
         let item = NSTabViewItem(identifier: "ai")
         item.label = "AI"
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 450, height: 300))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 450, height: 400))
 
-        var y: CGFloat = 260
+        var y: CGFloat = 360
 
-        // Local AI text cleanup
-        aiEnabledCheckbox = NSButton(checkboxWithTitle: "Local AI text cleanup", target: self, action: #selector(aiEnabledChanged))
+        // Local AI text cleanup toggle
+        aiEnabledCheckbox = NSButton(checkboxWithTitle: "AI text cleanup", target: self, action: #selector(aiEnabledChanged))
         aiEnabledCheckbox.frame = NSRect(x: 20, y: y, width: 220, height: 22)
         aiEnabledCheckbox.state = Settings.shared.aiEnabled ? .on : .off
         container.addSubview(aiEnabledCheckbox)
 
-        y -= 40
+        y -= 26
 
-        // Model
-        addLabel("Ollama model:", at: NSPoint(x: 20, y: y), in: container)
-        modelPopup = NSPopUpButton(frame: NSRect(x: 180, y: y - 2, width: 200, height: 26), pullsDown: false)
-        modelPopup.target = self
-        modelPopup.action = #selector(modelChanged)
-        container.addSubview(modelPopup)
-        populateModelPopup()
+        // Description
+        let desc = NSTextField(wrappingLabelWithString: "Cleans up grammar, removes filler words (um, uh, like), and handles corrections. Runs entirely on your Mac — nothing is sent to the cloud.")
+        desc.frame = NSRect(x: 38, y: y - 36, width: 392, height: 40)
+        desc.textColor = .secondaryLabelColor
+        desc.font = NSFont.systemFont(ofSize: 11)
+        container.addSubview(desc)
 
-        y -= 34
-
-        // Ollama status + install (hidden unless Ollama provider selected and unreachable)
-        ollamaStatusLabel = NSTextField(labelWithString: "")
-        ollamaStatusLabel.frame = NSRect(x: 20, y: y, width: 200, height: 22)
-        ollamaStatusLabel.textColor = .systemOrange
-        ollamaStatusLabel.font = NSFont.systemFont(ofSize: 12)
-        ollamaStatusLabel.isHidden = true
-        container.addSubview(ollamaStatusLabel)
-
-        ollamaInstallButton = NSButton(title: "Install Ollama", target: self, action: #selector(installOllama))
-        ollamaInstallButton.frame = NSRect(x: 230, y: y - 2, width: 150, height: 24)
-        ollamaInstallButton.bezelStyle = .rounded
-        ollamaInstallButton.font = NSFont.systemFont(ofSize: 11)
-        ollamaInstallButton.isHidden = true
-        container.addSubview(ollamaInstallButton)
-
-        y -= 44
-
-        // Test connection button
-        testButton = NSButton(title: "Test Connection", target: self, action: #selector(testConnection))
-        testButton.frame = NSRect(x: 20, y: y, width: 140, height: 28)
-        testButton.bezelStyle = .rounded
-        container.addSubview(testButton)
-
-        testResultLabel = NSTextField(labelWithString: "")
-        testResultLabel.frame = NSRect(x: 170, y: y + 4, width: 260, height: 22)
-        testResultLabel.textColor = .secondaryLabelColor
-        testResultLabel.font = NSFont.systemFont(ofSize: 11)
-        testResultLabel.lineBreakMode = .byTruncatingTail
-        container.addSubview(testResultLabel)
-
-        y -= 40
+        y -= 70
 
         // Custom prompt instructions
         addLabel("Custom instructions:", at: NSPoint(x: 20, y: y), in: container)
@@ -2786,6 +2954,29 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         aiCustomPromptField.cell?.isScrollable = true
         aiCustomPromptField.delegate = self
         container.addSubview(aiCustomPromptField)
+
+        y -= 72
+
+        // Custom transcription vocabulary — biases whisper toward these words
+        addLabel("Custom vocabulary:", at: NSPoint(x: 20, y: y), in: container)
+        y -= 4
+        let vocabHint = NSTextField(labelWithString: "Names, acronyms, technical terms — helps whisper recognize your jargon")
+        vocabHint.frame = NSRect(x: 20, y: y - 16, width: 410, height: 14)
+        vocabHint.textColor = .tertiaryLabelColor
+        vocabHint.font = NSFont.systemFont(ofSize: 10)
+        container.addSubview(vocabHint)
+
+        y -= 34
+
+        customVocabularyField = NSTextField(string: Settings.shared.customVocabulary)
+        customVocabularyField.frame = NSRect(x: 20, y: y - 40, width: 410, height: 60)
+        customVocabularyField.placeholderString = "Kubernetes, kubectl, faradaysoft, GGUF, whisper.cpp, ..."
+        customVocabularyField.font = NSFont.systemFont(ofSize: 12)
+        customVocabularyField.usesSingleLineMode = false
+        customVocabularyField.cell?.wraps = true
+        customVocabularyField.cell?.isScrollable = true
+        customVocabularyField.delegate = self
+        container.addSubview(customVocabularyField)
 
         item.view = container
         return item
@@ -2981,6 +3172,9 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         if let field = obj.object as? NSTextField, field === aiCustomPromptField {
             Settings.shared.aiCustomPrompt = field.stringValue
         }
+        if let field = obj.object as? NSTextField, field === customVocabularyField {
+            Settings.shared.customVocabulary = field.stringValue
+        }
     }
 
     @objc private func copyTranscriptRow() {
@@ -3153,61 +3347,6 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         return label
     }
 
-    private func populateModelPopup() {
-        modelPopup.removeAllItems()
-        let saved = Settings.shared.aiModel
-        modelPopup.addItem(withTitle: saved)
-        fetchOllamaModels()
-        modelPopup.selectItem(withTitle: saved)
-        updateOllamaStatus()
-    }
-
-    private func fetchOllamaModels() {
-        guard let url = URL(string: "http://localhost:11434/api/tags") else { return }
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
-            guard let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let models = json["models"] as? [[String: Any]] else {
-                if error != nil {
-                    DispatchQueue.main.async { self?.updateOllamaStatus() }
-                }
-                return
-            }
-            let names = models.compactMap { $0["name"] as? String }.sorted()
-            guard !names.isEmpty else { return }
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                let saved = self.modelPopup.selectedItem?.title ?? Settings.shared.aiModel
-                self.modelPopup.removeAllItems()
-                self.modelPopup.addItems(withTitles: names)
-                if self.modelPopup.item(withTitle: saved) == nil {
-                    self.modelPopup.addItem(withTitle: saved)
-                }
-                self.modelPopup.selectItem(withTitle: saved)
-            }
-        }.resume()
-    }
-
-    private func updateOllamaStatus() {
-        guard let url = URL(string: "http://localhost:11434/api/tags") else { return }
-        URLSession.shared.dataTask(with: url) { [weak self] _, response, error in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                if error == nil, let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                    self.ollamaStatusLabel.isHidden = true
-                    self.ollamaInstallButton.isHidden = true
-                } else {
-                    self.ollamaStatusLabel.stringValue = "Ollama not found"
-                    self.ollamaStatusLabel.textColor = .systemOrange
-                    self.ollamaStatusLabel.isHidden = false
-                    self.ollamaInstallButton.isHidden = false
-                    self.ollamaInstallButton.isEnabled = true
-                    self.ollamaInstallButton.title = "Install Ollama"
-                }
-            }
-        }.resume()
-    }
-
     private func updateDownloadButton() {
         let path = Settings.shared.whisperModelPath
         let exists = FileManager.default.fileExists(atPath: path)
@@ -3262,8 +3401,6 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         popoLabel?.stringValue = "5"
         clipboardCheckbox?.state = .on
         aiEnabledCheckbox?.state = .on
-        populateModelPopup()
-        testResultLabel?.stringValue = ""
         overlayEnabledCheckbox?.state = .on
         overlayAppNameCheckbox?.state = .on
         overlayAppIconCheckbox?.state = .on
@@ -3283,126 +3420,6 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
 
     @objc private func aiEnabledChanged() {
         Settings.shared.aiEnabled = aiEnabledCheckbox.state == .on
-    }
-
-    @objc private func modelChanged() {
-        if let title = modelPopup.selectedItem?.title {
-            Settings.shared.aiModel = title
-        }
-    }
-
-    @objc private func testConnection() {
-        testResultLabel.stringValue = "Testing..."
-        testResultLabel.textColor = .secondaryLabelColor
-
-        let client = OllamaClient()
-        client.testConnection { [weak self] success, message in
-            DispatchQueue.main.async {
-                self?.testResultLabel.stringValue = message
-                self?.testResultLabel.textColor = success ? .systemGreen : .systemRed
-            }
-        }
-    }
-
-    @objc private func installOllama() {
-        ollamaInstallButton.isEnabled = false
-        ollamaStatusLabel.stringValue = "Installing Ollama..."
-        ollamaStatusLabel.textColor = .secondaryLabelColor
-
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            // Step 1: brew install ollama
-            let brewInstall = Process()
-            brewInstall.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/brew")
-            brewInstall.arguments = ["install", "ollama"]
-            let installPipe = Pipe()
-            brewInstall.standardOutput = installPipe
-            brewInstall.standardError = installPipe
-
-            do {
-                try brewInstall.run()
-                brewInstall.waitUntilExit()
-            } catch {
-                DispatchQueue.main.async {
-                    self?.ollamaStatusLabel.stringValue = "Install failed: \(error.localizedDescription)"
-                    self?.ollamaStatusLabel.textColor = .systemRed
-                    self?.ollamaInstallButton.isEnabled = true
-                }
-                return
-            }
-
-            guard brewInstall.terminationStatus == 0 else {
-                let data = installPipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8) ?? "Unknown error"
-                let firstLine = output.components(separatedBy: .newlines).first(where: { !$0.isEmpty }) ?? "brew install failed"
-                DispatchQueue.main.async {
-                    self?.ollamaStatusLabel.stringValue = firstLine
-                    self?.ollamaStatusLabel.textColor = .systemRed
-                    self?.ollamaInstallButton.isEnabled = true
-                }
-                return
-            }
-
-            // Step 2: Start Ollama via brew services
-            DispatchQueue.main.async {
-                self?.ollamaStatusLabel.stringValue = "Starting Ollama..."
-            }
-
-            let brewStart = Process()
-            brewStart.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/brew")
-            brewStart.arguments = ["services", "start", "ollama"]
-            brewStart.standardOutput = FileHandle.nullDevice
-            brewStart.standardError = FileHandle.nullDevice
-            try? brewStart.run()
-            brewStart.waitUntilExit()
-
-            // Wait for the server to be ready
-            Thread.sleep(forTimeInterval: 3.0)
-
-            // Step 3: Pull default model
-            DispatchQueue.main.async {
-                self?.ollamaStatusLabel.stringValue = "Pulling llama3.2:3b model..."
-            }
-
-            let pull = Process()
-            pull.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/ollama")
-            pull.arguments = ["pull", "llama3.2:3b"]
-            let pullPipe = Pipe()
-            pull.standardOutput = pullPipe
-            pull.standardError = pullPipe
-
-            do {
-                try pull.run()
-                pull.waitUntilExit()
-            } catch {
-                DispatchQueue.main.async {
-                    self?.ollamaStatusLabel.stringValue = "Model pull failed: \(error.localizedDescription)"
-                    self?.ollamaStatusLabel.textColor = .systemRed
-                    self?.ollamaInstallButton.isEnabled = true
-                }
-                return
-            }
-
-            guard pull.terminationStatus == 0 else {
-                DispatchQueue.main.async {
-                    self?.ollamaStatusLabel.stringValue = "Model pull failed"
-                    self?.ollamaStatusLabel.textColor = .systemRed
-                    self?.ollamaInstallButton.isEnabled = true
-                }
-                return
-            }
-
-            // Success
-            DispatchQueue.main.async {
-                self?.ollamaStatusLabel.stringValue = "Ollama ready!"
-                self?.ollamaStatusLabel.textColor = .systemGreen
-                self?.ollamaInstallButton.isHidden = true
-                self?.populateModelPopup()
-                // Hide status after a few seconds
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                    self?.ollamaStatusLabel.isHidden = true
-                }
-            }
-        }
     }
 
     @objc private func whisperModelChanged() {
@@ -3500,6 +3517,110 @@ func writeWAVHeader(to handle: FileHandle, dataSize: UInt32) {
     handle.write(header)
 }
 
+// Peak-normalize a 16kHz mono Int16 PCM WAV file in place.
+// Raises quiet / mumbled speech to a consistent level before handing it to
+// Whisper, which performs dramatically better on normalized input.
+// Returns true on success; false leaves the file untouched.
+@discardableResult
+func normalizeWavFile(at path: String) -> Bool {
+    guard var data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+          data.count > 44 else { return false }
+
+    let headerSize = 44
+    let sampleBytes = data.count - headerSize
+    let sampleCount = sampleBytes / 2
+    guard sampleCount > 0 else { return false }
+
+    var peak: Int32 = 0
+    var rmsAccum: Double = 0
+    data.withUnsafeBytes { raw in
+        let base = raw.baseAddress!.advanced(by: headerSize).assumingMemoryBound(to: Int16.self)
+        for i in 0..<sampleCount {
+            let s = Int32(base[i])
+            let a = abs(s)
+            if a > peak { peak = a }
+            rmsAccum += Double(s) * Double(s)
+        }
+    }
+
+    let rms = sqrt(rmsAccum / Double(sampleCount)) / 32768.0
+    // Skip if too quiet overall (likely no speech) — normalizing pure noise
+    // just amplifies hiss and tanks whisper accuracy.
+    guard rms > 0.003, peak > 0 else { return false }
+
+    // Target -3 dBFS peak (~23170 of 32767). Cap gain at 20x so a single loud
+    // sample doesn't prevent quiet speech from being boosted.
+    let target: Double = 23170
+    var gain = target / Double(peak)
+    if gain < 1.0 { return false }   // already loud enough, leave it alone
+    if gain > 20.0 { gain = 20.0 }
+
+    data.withUnsafeMutableBytes { raw in
+        let base = raw.baseAddress!.advanced(by: headerSize).assumingMemoryBound(to: Int16.self)
+        for i in 0..<sampleCount {
+            var v = Double(base[i]) * gain
+            if v > 32767 { v = 32767 }
+            if v < -32768 { v = -32768 }
+            base[i] = Int16(v)
+        }
+    }
+
+    do {
+        try data.write(to: URL(fileURLWithPath: path))
+        return true
+    } catch {
+        return false
+    }
+}
+
+// Run a Process and wait up to `timeout` seconds. If it doesn't exit in time,
+// terminate it. Returns true if it exited normally within the window.
+@discardableResult
+func runWithTimeout(_ process: Process, timeout: TimeInterval) -> Bool {
+    let sem = DispatchSemaphore(value: 0)
+    var terminatedBy = "normal"
+    process.terminationHandler = { _ in sem.signal() }
+    let result = sem.wait(timeout: .now() + timeout)
+    if result == .timedOut {
+        terminatedBy = "timeout"
+        if process.isRunning {
+            process.terminate()
+            // Give it a brief grace period to flush pipes after SIGTERM.
+            _ = sem.wait(timeout: .now() + 0.5)
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+                _ = sem.wait(timeout: .now() + 0.5)
+            }
+        }
+        NSLog("Voice: process killed after %.1fs timeout", timeout)
+    }
+    process.terminationHandler = nil
+    return terminatedBy == "normal"
+}
+
+// Build a short initial prompt for whisper-cli that biases the decoder toward
+// the active app's vocabulary — e.g. code terms in Xcode, casual tone in
+// Messages. Whisper uses this as prior context without transcribing it.
+func whisperContextPrompt(from context: AppContext) -> String {
+    var parts: [String] = []
+    let app = context.appName.trimmingCharacters(in: .whitespaces)
+    if !app.isEmpty && app != "Unknown" {
+        parts.append("Dictating into \(app).")
+    }
+    let title = context.windowTitle.trimmingCharacters(in: .whitespaces)
+    if !title.isEmpty {
+        // Cap window title length — whisper prompts over ~200 tokens degrade.
+        let clipped = title.count > 120 ? String(title.prefix(120)) : title
+        parts.append("Window: \(clipped).")
+    }
+    let vocab = Settings.shared.customVocabulary.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !vocab.isEmpty {
+        let clipped = vocab.count > 300 ? String(vocab.prefix(300)) : vocab
+        parts.append("Vocabulary: \(clipped).")
+    }
+    return parts.joined(separator: " ")
+}
+
 // MARK: - App Delegate
 
 class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate, NSMenuDelegate {
@@ -3518,13 +3639,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     var whisperPath: String {
         let bundled = Bundle.main.resourcePath! + "/whisper-cli"
         if FileManager.default.fileExists(atPath: bundled) { return bundled }
-        return "/opt/homebrew/bin/whisper-cli"
+        // Search common install locations as last resort
+        for path in ["/opt/homebrew/bin/whisper-cli", "/usr/local/bin/whisper-cli"] {
+            if FileManager.default.fileExists(atPath: path) { return path }
+        }
+        // Return bundled path anyway — transcribeAndProcess will show proper error on launch failure
+        return bundled
     }
     let afplayPath = "/usr/bin/afplay"
 
     let inputMonitor = InputMonitor()
     let textInjector = TextInjector()
-    let ollamaClient = OllamaClient()
+    let llamaClient = LlamaClient()
     let overlayWindow = OverlayWindow()
 
     var popoTimer: Timer?
@@ -3751,16 +3877,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // License validation for existing subscribers
         LicenseManager.shared.validateIfNeeded()
 
-        // Preflight checks
-        if !FileManager.default.fileExists(atPath: Settings.shared.whisperModelPath) {
-            showNotification(title: "Voice", body: "Whisper model not found at \(Settings.shared.whisperModelPath)")
-        }
-
-        // Ollama health check and warmup for local cleanup.
-        if Settings.shared.aiEnabled {
-            ollamaClient.healthCheck { [weak self] available in
-                if available {
-                    self?.ollamaClient.warmup()
+        // Preflight: ensure whisper model exists (auto-download if missing)
+        ModelDownloadWindowController.shared.ensureModel { [weak self] in
+            // AI model health check.
+            if Settings.shared.aiEnabled {
+                self?.llamaClient.healthCheck { [weak self] available in
+                    if available {
+                        self?.llamaClient.warmup()
+                    }
                 }
             }
         }
@@ -4011,7 +4135,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
 
         var tapCallCount = 0
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] buffer, _ in
+        let tapBlock: AVAudioNodeTapBlock = { [weak self] buffer, _ in
             guard let self = self else { return }
             tapCallCount += 1
             // Convert to 16kHz mono Int16
@@ -4066,6 +4190,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 }
             }
         }
+        // installTap can raise ObjC exceptions on mic disconnect / format
+        // mismatch — catch them instead of crashing with SIGABRT.
+        let tapOK = VoiceExceptionCatcher.run {
+            inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat, block: tapBlock)
+        }
+        if !tapOK {
+            appState = .idle
+            inputMonitor.setRecording(false)
+            updateIcon()
+            hideOverlay()
+            audioFileHandle?.closeFile()
+            audioFileHandle = nil
+            if let f = audioFile { cleanup(f) }
+            audioFile = nil
+            showNotification(title: "Voice", body: "Microphone unavailable — try again")
+            return
+        }
 
         engine.prepare()
         do {
@@ -4117,7 +4258,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
 
         var tapCallCount = 0
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] buffer, _ in
+        let tapBlock: AVAudioNodeTapBlock = { [weak self] buffer, _ in
             guard let self = self else { return }
             tapCallCount += 1
             let ratio = 16000.0 / hwFormat.sampleRate
@@ -4142,6 +4283,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 let rms = sqrt(sum / Float(max(frameCount, 1)))
                 DispatchQueue.main.async { self.currentAudioLevel = rms }
             }
+        }
+        let tapOK = VoiceExceptionCatcher.run {
+            inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat, block: tapBlock)
+        }
+        if !tapOK {
+            NSLog("Voice: restartRecordingEngine — installTap raised, giving up")
+            return
         }
 
         engine.prepare()
@@ -4316,7 +4464,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             return
         }
 
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] buffer, _ in
+        let tapBlock: AVAudioNodeTapBlock = { [weak self] buffer, _ in
             guard let self = self else { return }
             let ratio = 16000.0 / hwFormat.sampleRate
             let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio)
@@ -4360,6 +4508,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                     }
                 }
             }
+        }
+        let tapOK = VoiceExceptionCatcher.run {
+            inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat, block: tapBlock)
+        }
+        if !tapOK {
+            audioFileHandle?.closeFile()
+            audioFileHandle = nil
+            appState = .idle
+            inputMonitor.setRecording(false)
+            inputMonitor.setPopo(false)
+            updateIcon()
+            hideOverlay()
+            showNotification(title: "Voice", body: "Microphone unavailable — try again")
+            return
         }
 
         engine.prepare()
@@ -4467,15 +4629,32 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             return
         }
 
+        // Capture active-app context once and reuse for both whisper biasing
+        // and the downstream LLM cleanup pass.
+        let appContext = AppContext.current()
+
+        // Peak-normalize the WAV so quiet/mumbled speech is brought up to a
+        // consistent level before whisper sees it. This is the single biggest
+        // quality win for low-volume input and costs ~10ms.
+        normalizeWavFile(at: audioFile)
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: whisperPath)
-        process.arguments = [
+        var whisperArgs: [String] = [
             "--model", Settings.shared.whisperModelPath,
             "--file", audioFile,
             "--no-timestamps",
             "--threads", "8",
-            "--language", "en"
+            "--language", "en",
+            // Wider beam than default 5 — markedly better on ambiguous /
+            // whispered audio at ~2x decode cost (still sub-second on turbo).
+            "--beam-size", "8"
         ]
+        let ctxPrompt = whisperContextPrompt(from: appContext)
+        if !ctxPrompt.isEmpty {
+            whisperArgs.append(contentsOf: ["--prompt", ctxPrompt])
+        }
+        process.arguments = whisperArgs
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -4483,7 +4662,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         do {
             try process.run()
-            process.waitUntilExit()
+            // Whisper turbo on 30s clips is sub-second on Apple Silicon.
+            // 60s is a generous watchdog against a wedged binary.
+            let completed = runWithTimeout(process, timeout: 60)
+            if !completed {
+                finishProcessing(error: "Transcription timed out")
+                cleanup(audioFile)
+                return
+            }
 
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             var rawText = String(data: data, encoding: .utf8) ?? ""
@@ -4535,8 +4721,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 return
             }
 
-            let context = AppContext.current()
-            ollamaClient.cleanupText(rawText, appContext: context) { [weak self] cleanedText in
+            llamaClient.cleanupText(rawText, appContext: appContext) { [weak self] cleanedText in
                 DispatchQueue.main.async {
                     self?.refocusAndInject(cleanedText)
                     self?.finishProcessing(text: cleanedText)

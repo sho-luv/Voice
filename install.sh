@@ -86,7 +86,10 @@ fi
 # --- Compile app ---
 echo "Compiling Voice..."
 
-swiftc -O -o "${SCRIPT_DIR}/Voice" "${SCRIPT_DIR}/Voice.swift" \
+swiftc -O -o "${SCRIPT_DIR}/Voice" \
+    "${SCRIPT_DIR}/Voice.swift" \
+    "${SCRIPT_DIR}/VoiceExceptionCatcher.m" \
+    -import-objc-header "${SCRIPT_DIR}/Voice-Bridging-Header.h" \
     -framework Cocoa -framework ApplicationServices -framework UserNotifications -framework AVFoundation -framework CoreAudio
 
 # --- Create app bundle ---
