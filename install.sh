@@ -1,30 +1,12 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 set -euo pipefail
-shopt -s nullglob
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_APP_DIR="${SCRIPT_DIR}/Voice.app"
 INSTALL_APP_DIR="/Applications/Voice.app"
 LAUNCH_AGENT_DIR="${HOME}/Library/LaunchAgents"
 LAUNCH_AGENT_PATH="${LAUNCH_AGENT_DIR}/com.faradaysoft.voice.plist"
-
-find_tool_path() {
-    local binary="$1"
-    shift
-    local candidate
-    if candidate="$(command -v "$binary" 2>/dev/null)"; then
-        printf '%s\n' "${candidate}"
-        return 0
-    fi
-    for candidate in "$@"; do
-        if [[ -x "${candidate}" ]]; then
-            printf '%s\n' "${candidate}"
-            return 0
-        fi
-    done
-    return 1
-}
 
 echo "=== Voice Installer ==="
 
@@ -44,7 +26,7 @@ fi
 
 # The app needs neither whisper-cli nor sox; the optional `voice` CLI does.
 if [[ -f "${SCRIPT_DIR}/voice.sh" ]]; then
-    if ! find_tool_path whisper-cli "/opt/homebrew/bin/whisper-cli" "/usr/local/bin/whisper-cli" >/dev/null; then
+    if ! command -v whisper-cli &>/dev/null; then
         echo "Installing whisper-cpp for the voice CLI..."
         brew install whisper-cpp
     fi
@@ -58,11 +40,10 @@ fi
 "${SCRIPT_DIR}/build-app.sh"
 
 # Sign with stable identity so macOS TCC keeps accessibility permission across recompiles.
-# Priority: Developer ID Application > Voice Dev > ad-hoc
-SIGN_CERT=""
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application: Faraday Soft"; then
-    SIGN_CERT="Developer ID Application: Faraday Soft (MWW7M2563A)"
-elif security find-identity -v -p codesigning 2>/dev/null | grep -q "Voice Dev"; then
+# Priority: $VOICE_CODESIGN_IDENTITY > any Developer ID Application > Voice Dev > ad-hoc
+IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+SIGN_CERT="${VOICE_CODESIGN_IDENTITY:-$(printf '%s\n' "${IDENTITIES}" | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)}"
+if [[ -z "$SIGN_CERT" ]] && printf '%s\n' "${IDENTITIES}" | grep -q '"Voice Dev"'; then
     SIGN_CERT="Voice Dev"
 fi
 
@@ -119,6 +100,6 @@ echo "=== Done ==="
 echo "  Hold fn        = Push-to-talk (record while held)"
 echo "  Double-tap fn  = Hands-free mode (lock-on dictation, tap fn to stop)"
 echo "  Escape         = Cancel recording"
-echo "  Menu bar: microphone icon"
+echo "  Menu bar: waveform icon"
 echo ""
 echo "First use: macOS will prompt for Accessibility and Microphone permissions -- grant both."

@@ -28,11 +28,11 @@ while getopts "m:skh" opt; do
         s) SILENCE_ONLY=true ;;
         k) KEEP_AUDIO=true ;;
         h)
-            sed -n '3,10p' "$0" | sed 's/^# \?//'
+            sed -n '3,10p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
-            sed -n '3,10p' "$0" | sed 's/^# \?//'
+            sed -n '3,10p' "$0" | sed 's/^# \{0,1\}//'
             exit 1
             ;;
     esac
@@ -68,9 +68,8 @@ fi
 
 if [[ ! -f "$MODEL_FILE" ]]; then
     echo "Error: Model not found at ${MODEL_FILE}" >&2
-    echo "Download it with:" >&2
-    echo "  curl -L -o \"${MODEL_FILE}\" \\
-    \"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${MODEL_NAME}.bin\"" >&2
+    echo "The Voice app downloads it (SHA-256 verified): Settings > Transcription >" >&2
+    echo "choose \"Whisper turbo\" > Download. Or pass -m with another ggml model in that folder." >&2
     exit 1
 fi
 

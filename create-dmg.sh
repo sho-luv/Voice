@@ -19,7 +19,6 @@
 #     --password APP_SPECIFIC_PASSWORD
 
 set -euo pipefail
-shopt -s nullglob
 
 APP_NAME="Voice"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -49,7 +48,6 @@ else
     CERT="-"
     echo "Warning: No Developer ID or Voice Dev certificate found. Using ad-hoc signing." >&2
     echo "  Users will need to right-click > Open on first launch." >&2
-    USE_DEVELOPER_ID=false
 fi
 
 # --- Build (engine + app bundle; no helper binaries or dylibs) ---
@@ -72,7 +70,7 @@ fi
 # --- Create DMG (polished install UX via `create-dmg`) ---
 # Requires: brew install create-dmg
 echo "Creating DMG..."
-hdiutil detach /Volumes/Voice 2>/dev/null || true
+hdiutil detach "/Volumes/Voice ${VERSION}" 2>/dev/null || true
 rm -f "${SCRIPT_DIR}/${DMG_NAME}"
 
 if ! command -v create-dmg &>/dev/null; then
@@ -103,7 +101,7 @@ fi
 
 # --- Notarization ---
 if [[ "$USE_DEVELOPER_ID" == "true" ]]; then
-    if xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" &>/dev/null 2>&1; then
+    if xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" &>/dev/null; then
         echo "Notarizing DMG (this may take a few minutes)..."
         xcrun notarytool submit "${SCRIPT_DIR}/${DMG_NAME}" --keychain-profile "${NOTARY_PROFILE}" --wait
         echo "Stapling notarization ticket..."

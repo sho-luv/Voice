@@ -13,13 +13,13 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>3.2.6</string>
+	<string>3.3</string>
 	<key>CFBundleVersion</key>
-	<string>3.2.6</string>
+	<string>3.3</string>
 	<key>LSUIElement</key>
 	<false/>
 	<key>NSHumanReadableCopyright</key>
-	<string>Copyright © 2026 Enfrosec LLC. All rights reserved.</string>
+	<string>Copyright © 2026 Enfrosec LLC (dba Faraday Soft). Licensed under GPL-3.0-or-later.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Voice needs microphone access to record speech for transcription.</string>
 </dict>
