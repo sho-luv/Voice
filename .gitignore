@@ -1,23 +1,27 @@
-# Compiled binary and app bundle
+# Build output
 Voice
 Voice.app/
-
-# Code signing
 _CodeSignature/
+*.dmg
+engine/.deps/
+engine/build/
 
 # macOS
 .DS_Store
 
-# Temporary test files
-*.log
-.gstack/
+# Local tooling and agent state
 .claude/
+.gstack/
 .planning/
-*.dmg
+.wrangler/
 
-# Engine build (engine/build.sh)
-engine/.deps/
-engine/build/
+# Personal notes and marketing material (kept locally, not published)
+update.md
+TODO*.md
+MARKETING-PLAN.md
+demo/
+package-lock.json
+voice_1600x1200_*
 
 # Website lives in its own repo (sho-luv/faradaysoft.com)
 website/

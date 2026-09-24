@@ -45,7 +45,7 @@ Homebrew's whisper-cpp vendors ggml 0.9.x while llama.cpp links Homebrew's ggml 
 
 **Qwen2.5-1.5B-Instruct Q4_0** (`qwen2.5-1.5b-instruct-q4_0.gguf`, 1.07 GB).
 
-Chosen because it's the only sub-1GB model evaluated that both:
+Chosen because it's the only small (<1.5 GB) model evaluated that both:
 - Faithfully preserves the speaker's wording (doesn't paraphrase aggressively)
 - Treats input as text-to-rewrite, not a message-to-reply-to
 
@@ -116,9 +116,9 @@ This is NOT a reasoning task, NOT a coding task, NOT a general chat task. Most i
 
 Discovered during Gemma investigation that a bug existed in 3.2.3: `Voice.swift` hardcoded the 1.5B model filename while `create-dmg.sh` bundled the 0.5B file. Result: `healthCheck` returned false, `isAvailable = false`, `cleanupText()` returned the raw input unchanged. **The app was silently skipping AI cleanup entirely.**
 
-**Lesson:** The `modelFileName` must be defined in exactly one place. Consider reading it from a resource lookup (glob `Resources/*.gguf`) or from a build-time constant so the Swift code and bundle script can't drift.
+**Lesson:** Model file names must be defined in exactly one place. Resolved in 3.3: `ModelCatalog` in `SpeechEngine.swift` is the single source for file name, URL and SHA-256.
 
-### ✅ Qwen2.5-1.5B-Instruct Q4_0 (940 MB)
+### ✅ Qwen2.5-1.5B-Instruct Q4_0 (1.07 GB)
 
 **Head-to-head bench with same three prompts as Llama:**
 | Input | Qwen 1.5B result |

@@ -6,7 +6,7 @@
 
 **Local speech-to-text for macOS. Hold fn, speak, release. Text appears wherever your cursor is.**
 
-Voice is a menu bar and Dock app that replaces cloud-based dictation with fast, private, local transcription. It works everywhere -- terminals, browsers, editors, chat apps -- while keeping your audio and transcriptions on your Mac.
+Voice is a menu bar app that replaces cloud-based dictation with fast, private, local transcription. It works everywhere -- terminals, browsers, editors, chat apps -- while keeping your audio and transcriptions on your Mac.
 
 Built on [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (Parakeet and Whisper speech models) and [llama.cpp](https://github.com/ggml-org/llama.cpp) (local AI cleanup), both compiled into the app. Voice is free and open source, with no accounts, usage limits, or telemetry. Audio and transcripts never leave your Mac. The only network requests are the one-time model downloads from Hugging Face and the "Check for Updates" menu item. Inspired by [Wispr Flow](https://wispr.com).
 
@@ -20,7 +20,7 @@ cd Voice
 ./install.sh
 ```
 
-That's it. The installer takes care of dependencies, model download, compilation, code signing, and auto-start on login. On first launch macOS will ask for two permissions -- grant both:
+That's it. The installer builds and signs the app, installs it to `/Applications`, and sets it to start at login. On first launch Voice downloads its speech model (356 MB, plus 1.07 GB for AI cleanup if enabled). On first launch macOS will ask for two permissions -- grant both:
 
 1. **Accessibility** -- needed to detect the hotkey and inject text
 2. **Microphone** -- needed to record audio
@@ -40,12 +40,12 @@ A floating overlay at the top of the screen shows what's happening:
 | Indicator | Meaning |
 |-----------|---------|
 | Pulsing red dot | Recording |
-| Pulsing blue dot | POPO mode (continuous) |
+| Pulsing blue dot | Hands-free mode |
 | Hourglass | Transcribing |
 | Checkmark + text preview | Done |
 | X + error message | Something went wrong |
 
-The menu bar icon (a waveform) also reflects the current state. Click it for options including **Paste Last** to re-insert the most recent transcription. The app also appears in the Dock with its waveform icon.
+The menu bar icon (a waveform) also reflects the current state. Click it for options including **Paste Last** to re-insert the most recent transcription, and to switch microphones.
 
 ### Transcription History
 
@@ -69,8 +69,17 @@ Open from the menu bar (click the waveform icon > "Settings...") or press **Cmd+
 | Push-to-talk key | fn, Right Option, Left Option, or Right Cmd | fn |
 | Sounds | Audio feedback for recording start/stop/done | On |
 | Auto-start on login | Install/remove LaunchAgent | On |
-| POPO timeout | Safety auto-stop for POPO mode (1-30 min) | 5 min |
+| Hands-free timeout | Safety auto-stop for hands-free mode (1-30 min) | 5 min |
 | Restore clipboard after paste | Saves and restores clipboard when using Cmd+V paste | On |
+
+### Audio
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| Microphone | Input device, or the system default | System default |
+| Show overlay | Floating recording overlay, with optional app name, app icon, and timer | On |
+| Background, font size | Overlay appearance | 60%, medium |
+| Waveform | How tall the overlay waveform bounces. Visual only; doesn't affect recording or transcription | 30x |
 
 ### AI
 
@@ -96,7 +105,7 @@ All settings persist across restarts via `UserDefaults` (`~/Library/Preferences/
 Voice automatically picks the best method for the active app:
 
 - **Most apps** (browsers, editors, chat) -- text is injected directly via the macOS Accessibility API. Instant, no clipboard involvement.
-- **Terminal apps** (iTerm2, Terminal, Alacritty, WezTerm, Kitty, Warp, Hyper) -- uses clipboard paste with simulated Cmd+V. Your original clipboard is saved beforehand and restored after 500ms (configurable in Settings).
+- **Terminal apps** (iTerm2, Terminal, Alacritty, WezTerm, Kitty, Warp, Hyper) -- uses clipboard paste with simulated Cmd+V. Your original clipboard is saved beforehand and restored 500 ms later (turn this off in Settings > General).
 
 This happens automatically. No configuration needed.
 
@@ -107,7 +116,7 @@ Voice can clean up raw transcription before inserting it:
 - Strips filler words (um, uh, like, you know, basically)
 - Fixes grammar and punctuation
 - Handles corrections ("scratch that", "no wait" -- keeps only the final version)
-- Adapts tone to context (professional in Mail, casual in Messages, technical in Terminal)
+- Knows which app you're dictating into
 
 Hesitations ("um", "uh") are always removed deterministically. The local LLM (`Qwen2.5-1.5B-Instruct Q4_0`, run in-process by llama.cpp) only runs when a transcript needs judgment — ambiguous fillers, self-corrections, repeated words — and its output is discarded if it stops being a faithful rewrite (e.g. the model answers the text instead of cleaning it). Clean dictation is pasted without touching the model.
 
@@ -132,9 +141,13 @@ See [MODELS.md](MODELS.md) for benchmarks and the model selection history.
 
 The installer installs `cmake` if needed, builds the engine, and installs the app. The app downloads its models on first launch.
 
+## Command-Line Companion
+
+`install.sh` also links `voice.sh` to `~/bin/voice`, a terminal tool that records until you press Enter (or `voice -s` to stop after 3 seconds of silence), transcribes locally, and copies the text to the clipboard. It uses Homebrew's `whisper-cli` and `sox` (installed for you) and the Whisper turbo model, so select **Whisper turbo** in Settings > Transcription and download it once. It does not run AI cleanup.
+
 ## Release Docs
 
-For release process documentation, see [RELEASING.md](RELEASING.md). That covers the GitHub Actions release pipeline, signing and notarization setup, versioning rules, and the exact steps for shipping a tagged release.
+See [RELEASING.md](RELEASING.md) for the signed, notarized release pipeline.
 
 ## Manual Build
 
@@ -222,15 +235,14 @@ The app must **not be running** when you grant the permission.
 - Clean dictation intentionally skips the model — only transcripts with fillers or corrections are sent to it
 - Run `Voice --selftest` (see Manual Build) to see the model's output and whether the guardrail accepted it
 
-**Settings window appears on relaunch**
-- This was a macOS window restoration issue, now fixed. If it persists: `rm -rf ~/Library/Saved\ Application\ State/com.faradaysoft.voice.savedState` and relaunch
-
 ## Uninstall
 
 ```bash
 pkill -f Voice.app
+rm -rf /Applications/Voice.app
 rm ~/Library/LaunchAgents/com.faradaysoft.voice.plist
-# Optionally remove whisper models:
+rm -f ~/bin/voice
+# Optionally remove downloaded models:
 rm -rf ~/Library/Application\ Support/Voice/Models
 # Optionally remove settings:
 defaults delete com.faradaysoft.voice
