@@ -96,6 +96,34 @@ enum ModelCatalog {
     static func speech(id: String) -> ModelSpec {
         speechModels.first { $0.id == id } ?? parakeet
     }
+
+    // Languages both engines handle. Parakeet TDT v3 is multilingual across
+    // ~25 European languages and auto-detects; Whisper turbo is multilingual
+    // and takes an explicit code (or auto-detects). "auto" lets the model decide.
+    static let languages: [(code: String, name: String)] = [
+        ("auto", "Automatic"),
+        ("en", "English"),
+        ("es", "Spanish"),
+        ("fr", "French"),
+        ("de", "German"),
+        ("it", "Italian"),
+        ("pt", "Portuguese"),
+        ("nl", "Dutch"),
+        ("pl", "Polish"),
+        ("ru", "Russian"),
+        ("uk", "Ukrainian"),
+        ("sv", "Swedish"),
+        ("da", "Danish"),
+        ("no", "Norwegian"),
+        ("fi", "Finnish"),
+        ("cs", "Czech"),
+        ("ro", "Romanian"),
+        ("el", "Greek"),
+    ]
+
+    static func languageName(_ code: String) -> String {
+        languages.first { $0.code == code }?.name ?? "Automatic"
+    }
 }
 
 // Streams the file through SHA-256 so a 1 GB model doesn't have to fit in memory.
@@ -154,7 +182,7 @@ final class SpeechEngine {
             if let asr = self.loadSpeech(speech) {
                 let silence = [Float](repeating: 0, count: 16_000)
                 let result = silence.withUnsafeBufferPointer { buf in
-                    ve_asr_transcribe(asr, buf.baseAddress, Int32(buf.count), nil, self.threads)
+                    ve_asr_transcribe(asr, buf.baseAddress, Int32(buf.count), nil, nil, self.threads)
                 }
                 ve_free(result)
             }
@@ -164,14 +192,18 @@ final class SpeechEngine {
         }
     }
 
-    /// 16 kHz mono samples in [-1, 1]. Blocks; call off the main thread.
-    func transcribe(_ samples: [Float], model: ModelSpec, prompt: String) -> String? {
+    /// 16 kHz mono samples in [-1, 1]. `language` is an ISO code for Whisper
+    /// ("en", "es", …) or "auto"/"" to detect; Parakeet ignores it (it is
+    /// inherently multilingual). Blocks; call off the main thread.
+    func transcribe(_ samples: [Float], model: ModelSpec, prompt: String, language: String) -> String? {
         queue.sync {
             defer { scheduleIdleUnload() }
             guard let asr = loadSpeech(model) else { return nil }
             let result = samples.withUnsafeBufferPointer { buf in
-                ve_asr_transcribe(asr, buf.baseAddress, Int32(buf.count),
-                                  prompt.isEmpty ? nil : prompt, threads)
+                language.withCString { lang in
+                    ve_asr_transcribe(asr, buf.baseAddress, Int32(buf.count),
+                                      prompt.isEmpty ? nil : prompt, lang, threads)
+                }
             }
             guard let result else { return nil }
             defer { ve_free(result) }
@@ -449,7 +481,7 @@ enum SelfTest {
                 continue
             }
             var start = Date()
-            let raw = SpeechEngine.shared.transcribe(samples, model: model, prompt: "") ?? ""
+            let raw = SpeechEngine.shared.transcribe(samples, model: model, prompt: "", language: "auto") ?? ""
             let asrTime = ms(start)
             start = Date()
             let polished = polishTranscript(raw, appContext: context)

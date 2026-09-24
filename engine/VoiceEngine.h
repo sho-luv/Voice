@@ -33,8 +33,10 @@ ve_asr * ve_asr_load(const char * model_path, ve_asr_kind kind);
 // pcm: 16 kHz mono float samples in [-1, 1].
 // prompt: whisper initial prompt (ignored by parakeet); may be NULL.
 // Returns NULL on failure.
+// language: ISO code ("en", "es", …) for Whisper; NULL or "auto" auto-detects.
+// Parakeet is inherently multilingual and ignores this.
 char *   ve_asr_transcribe(ve_asr * asr, const float * pcm, int n_samples,
-                           const char * prompt, int n_threads);
+                           const char * prompt, const char * language, int n_threads);
 void     ve_asr_free(ve_asr * asr);
 
 ve_llm * ve_llm_load(const char * model_path, int n_ctx);

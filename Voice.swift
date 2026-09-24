@@ -120,6 +120,14 @@ class Settings {
 
     var speechModel: ModelSpec { ModelCatalog.speech(id: speechModelID) }
 
+    // Spoken language. "auto" detects; otherwise an ISO code (see
+    // ModelCatalog.languages). Parakeet is multilingual regardless; this
+    // steers Whisper and gates the English-only text cleanup.
+    var transcriptionLanguage: String {
+        get { defaults.string(forKey: "transcriptionLanguage") ?? "auto" }
+        set { defaults.set(newValue, forKey: "transcriptionLanguage") }
+    }
+
     // Free-text user vocabulary (names, acronyms, technical terms). Whisper
     // takes it as a decoder prompt; for every model it also restores the
     // user's spelling after transcription (TextCleanup.applyVocabulary).
@@ -244,7 +252,7 @@ class Settings {
         // Reset user-facing settings to defaults (preserves saved transcripts)
         let keysToReset = [
             "hotkeyIndex", "soundsEnabled", "autoStartOnLogin", "popoTimeout",
-            "clipboardRestore", "aiEnabled", "speechModel",
+            "clipboardRestore", "aiEnabled", "speechModel", "transcriptionLanguage",
             "aiCustomPrompt", "customVocabulary", "micDeviceUID", "overlayShowAppName", "overlayShowAppIcon",
             "overlayShowWindowTitle", "overlayShowTimer",
             "overlayEnabled", "overlayBackgroundOpacity", "overlayFontSize",
@@ -483,6 +491,14 @@ func cleanupSystemPrompt(appContext: AppContext) -> String {
 // can't be paraphrased. Blocks; call off the main thread.
 func polishTranscript(_ raw: String, appContext: AppContext) -> String {
     let vocabulary = Settings.shared.customVocabulary
+    // The hesitation rules and cleanup prompt are English-tuned. Apply them for
+    // English or Automatic (usually English); for an explicitly non-English
+    // language, just restore vocabulary spelling and paste the ASR text, which
+    // is already punctuated.
+    let lang = Settings.shared.transcriptionLanguage
+    guard lang == "en" || lang == "auto" else {
+        return TextCleanup.applyVocabulary(raw, vocabulary: vocabulary)
+    }
     let text = TextCleanup.applyVocabulary(TextCleanup.removeHesitations(raw), vocabulary: vocabulary)
     // Very long dictation (~1000+ tokens) would crowd the model's context and
     // take seconds; it gets deterministic cleanup only.
@@ -2063,6 +2079,7 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
 
     // Transcription tab controls
     private var speechModelPopup: NSPopUpButton!
+    private var languagePopup: NSPopUpButton!
     private var downloadButton: NSButton!
     private var downloadStatusLabel: NSTextField!
     private var saveTranscriptsCheckbox: NSButton!
@@ -2473,6 +2490,21 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         container.addSubview(downloadStatusLabel)
         updateDownloadButton()
 
+        y -= 30
+
+        // Language — Parakeet is multilingual; this steers Whisper and gates
+        // the English-only text cleanup.
+        addLabel("Language:", at: NSPoint(x: 20, y: y), in: container)
+        languagePopup = NSPopUpButton(frame: NSRect(x: 95, y: y - 2, width: 180, height: 24), pullsDown: false)
+        for lang in ModelCatalog.languages {
+            languagePopup.addItem(withTitle: lang.name)
+            languagePopup.lastItem?.representedObject = lang.code
+        }
+        languagePopup.selectItem(at: ModelCatalog.languages.firstIndex { $0.code == Settings.shared.transcriptionLanguage } ?? 0)
+        languagePopup.target = self
+        languagePopup.action = #selector(languageChanged)
+        container.addSubview(languagePopup)
+
         y -= 26
 
         // Save transcripts — single compact row
@@ -2740,6 +2772,12 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         Settings.shared.aiEnabled = aiEnabledCheckbox.state == .on
         if Settings.shared.aiEnabled {
             ModelDownloadWindowController.shared.ensureModels([ModelCatalog.cleanup]) {}
+        }
+    }
+
+    @objc private func languageChanged() {
+        if let code = languagePopup.selectedItem?.representedObject as? String {
+            Settings.shared.transcriptionLanguage = code
         }
     }
 
@@ -3539,7 +3577,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         // Only Whisper can use a biasing prompt; Parakeet has no prompt input.
         let prompt = model.asrKind == VE_ASR_WHISPER ? whisperContextPrompt(from: appContext) : ""
-        guard var rawText = SpeechEngine.shared.transcribe(samples, model: model, prompt: prompt) else {
+        let language = Settings.shared.transcriptionLanguage
+        guard var rawText = SpeechEngine.shared.transcribe(samples, model: model, prompt: prompt, language: language) else {
             finishProcessing(error: "Transcription failed")
             return
         }

@@ -87,7 +87,7 @@ ve_asr * ve_asr_load(const char * model_path, ve_asr_kind kind) {
 }
 
 char * ve_asr_transcribe(ve_asr * asr, const float * pcm, int n_samples,
-                         const char * prompt, int n_threads) {
+                         const char * prompt, const char * language, int n_threads) {
     if (!asr || !pcm || n_samples <= 0) return nullptr;
     std::string text;
 
@@ -109,7 +109,11 @@ char * ve_asr_transcribe(ve_asr * asr, const float * pcm, int n_samples,
         // and nearly free once the model is resident (batched decode on Metal).
         params.beam_search.beam_size = 8;
         params.n_threads        = n_threads;
-        params.language         = "en";
+        const bool autoDetect   = (language == nullptr || strcmp(language, "auto") == 0 || language[0] == '\0');
+        // language "auto" makes whisper.cpp detect and transcribe. Note
+        // detect_language must stay false — when true it detects and exits
+        // without producing any text.
+        params.language         = autoDetect ? "auto" : language;
         params.detect_language  = false;
         params.translate        = false;
         params.no_context       = true;

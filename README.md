@@ -94,6 +94,7 @@ Open from the menu bar (click the waveform icon > "Settings...") or press **Cmd+
 | Setting | Description | Default |
 |---------|-------------|---------|
 | Model | Parakeet v3 (fastest) or Whisper large-v3-turbo (supports vocabulary biasing) | Parakeet v3 |
+| Language | Automatic (detect) or a specific language — both models are multilingual | Automatic |
 | Download Model | Download the selected model if not already on disk | -- |
 | Save transcripts | Save each transcription to a local text file | On |
 | Transcript directory | Folder used for saved transcript files | `~/Documents/Voice Transcripts` |
