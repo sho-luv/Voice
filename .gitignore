@@ -14,3 +14,10 @@ _CodeSignature/
 .claude/
 .planning/
 *.dmg
+
+# Engine build (engine/build.sh)
+engine/.deps/
+engine/build/
+
+# Website lives in its own repo (sho-luv/faradaysoft.com)
+website/
