@@ -1,45 +1,13 @@
+// Voice — local speech-to-text for macOS
+// Copyright (C) 2026 Enfrosec LLC (dba Faraday Soft)
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Cocoa
 import ApplicationServices
 import UserNotifications
 import AVFoundation
 import CoreAudio
-import Security
-
-// MARK: - String Obfuscation
-
-/// XOR-based string obfuscation to prevent plaintext extraction via `strings` binary.
-/// Strings are stored as XOR'd byte arrays and decoded at runtime. The key is a single
-/// byte chosen at compile time. This deters casual reverse engineering — it is not
-/// cryptographically secure, but raises the bar above `strings | grep`.
-private enum ObfuscatedStrings {
-    private static func decode(_ bytes: [UInt8], key: UInt8) -> String {
-        String(bytes.map { Character(UnicodeScalar($0 ^ key)) })
-    }
-
-    // Key: 0xAB
-    // Generated with: python3 -c "k=0xAB; print([hex(b ^ k) for b in b'<string>'])"
-
-    static var checkoutURL: String {
-        // "https://faradaysoft.lemonsqueezy.com/checkout/buy/34d167b8-e5ef-4850-8d4c-0f1f0a32759b"
-        // LemonSqueezy product 920798. Single checkout presents both $5/mo and $39/yr options
-        // plus a 14-day free trial. Previous UUID (2617c440-...) pointed at the retired product
-        // 912013 which had zero sales attached.
-        let b: [UInt8] = [0xc3, 0xdf, 0xdf, 0xdb, 0xd8, 0x91, 0x84, 0x84, 0xcd, 0xca, 0xd9, 0xca, 0xcf, 0xca, 0xd2, 0xd8, 0xc4, 0xcd, 0xdf, 0x85, 0xc7, 0xce, 0xc6, 0xc4, 0xc5, 0xd8, 0xda, 0xde, 0xce, 0xce, 0xd1, 0xd2, 0x85, 0xc8, 0xc4, 0xc6, 0x84, 0xc8, 0xc3, 0xce, 0xc8, 0xc0, 0xc4, 0xde, 0xdf, 0x84, 0xc9, 0xde, 0xd2, 0x84, 0x98, 0x9f, 0xcf, 0x9a, 0x9d, 0x9c, 0xc9, 0x93, 0x86, 0xce, 0x9e, 0xce, 0xcd, 0x86, 0x9f, 0x93, 0x9e, 0x9b, 0x86, 0x93, 0xcf, 0x9f, 0xc8, 0x86, 0x9b, 0xcd, 0x9a, 0xcd, 0x9b, 0xca, 0x98, 0x99, 0x9c, 0x9e, 0x92, 0xc9]
-        return decode(b, key: 0xAB)
-    }
-
-    static var activateURL: String {
-        // "https://api.lemonsqueezy.com/v1/licenses/activate"
-        let b: [UInt8] = [0xc3, 0xdf, 0xdf, 0xdb, 0xd8, 0x91, 0x84, 0x84, 0xca, 0xdb, 0xc2, 0x85, 0xc7, 0xce, 0xc6, 0xc4, 0xc5, 0xd8, 0xda, 0xde, 0xce, 0xce, 0xd1, 0xd2, 0x85, 0xc8, 0xc4, 0xc6, 0x84, 0xdd, 0x9a, 0x84, 0xc7, 0xc2, 0xc8, 0xce, 0xc5, 0xd8, 0xce, 0xd8, 0x84, 0xca, 0xc8, 0xdf, 0xc2, 0xdd, 0xca, 0xdf, 0xce]
-        return decode(b, key: 0xAB)
-    }
-
-    static var validateURL: String {
-        // "https://api.lemonsqueezy.com/v1/licenses/validate"
-        let b: [UInt8] = [0xc3, 0xdf, 0xdf, 0xdb, 0xd8, 0x91, 0x84, 0x84, 0xca, 0xdb, 0xc2, 0x85, 0xc7, 0xce, 0xc6, 0xc4, 0xc5, 0xd8, 0xda, 0xde, 0xce, 0xce, 0xd1, 0xd2, 0x85, 0xc8, 0xc4, 0xc6, 0x84, 0xdd, 0x9a, 0x84, 0xc7, 0xc2, 0xc8, 0xce, 0xc5, 0xd8, 0xce, 0xd8, 0x84, 0xdd, 0xca, 0xc7, 0xc2, 0xcf, 0xca, 0xdf, 0xce]
-        return decode(b, key: 0xAB)
-    }
-}
+import Security  // SecItemDelete: one-time purge of the old license key
 
 // MARK: - App State
 
@@ -65,94 +33,12 @@ let hotkeyOptions: [HotkeyOption] = [
     HotkeyOption(name: "Right Cmd", keyCode: 54, flagMask: .maskCommand),
 ]
 
-// MARK: - Keychain
-
-enum KeychainStore {
-    static let service = "com.faradaysoft.voice"
-
-    static func string(for account: String) -> String {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: account,
-            kSecMatchLimit: kSecMatchLimitOne,
-            kSecReturnData: true,
-        ]
-
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        switch status {
-        case errSecSuccess:
-            guard let data = item as? Data,
-                  let value = String(data: data, encoding: .utf8) else {
-                return ""
-            }
-            return value
-        case errSecItemNotFound:
-            return ""
-        default:
-            NSLog("Voice: keychain read failed for %@ (%d)", account, status)
-            return ""
-        }
-    }
-
-    @discardableResult
-    static func set(_ value: String, for account: String) -> Bool {
-        if value.isEmpty {
-            return delete(account)
-        }
-
-        let data = Data(value.utf8)
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: account,
-        ]
-        let attributes: [CFString: Any] = [kSecValueData: data]
-
-        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if updateStatus == errSecSuccess {
-            return true
-        }
-        if updateStatus != errSecItemNotFound {
-            NSLog("Voice: keychain update failed for %@ (%d)", account, updateStatus)
-            return false
-        }
-
-        var addQuery = query
-        addQuery[kSecValueData] = data
-        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-        if addStatus != errSecSuccess {
-            NSLog("Voice: keychain add failed for %@ (%d)", account, addStatus)
-            return false
-        }
-        return true
-    }
-
-    @discardableResult
-    static func delete(_ account: String) -> Bool {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: account,
-        ]
-        let status = SecItemDelete(query as CFDictionary)
-        if status == errSecSuccess || status == errSecItemNotFound {
-            return true
-        }
-        NSLog("Voice: keychain delete failed for %@ (%d)", account, status)
-        return false
-    }
-}
-
 // MARK: - Settings
 
 class Settings {
     static let shared = Settings()
 
     private let defaults = UserDefaults.standard
-    private let licenseKeyAccount = "license-key"
-    private let licenseInstanceIdAccount = "license-instance-id"
 
     private init() {
         defaults.register(defaults: [
@@ -163,7 +49,6 @@ class Settings {
             "clipboardRestore": true,
             "aiEnabled": true,
             "aiModelOllama": "llama3.2:3b",
-            "whisperModel": "large-v3-turbo-q5_0",
             "micDeviceUID": "",
             "overlayShowAppName": true,
             "overlayShowAppIcon": true,
@@ -171,7 +56,8 @@ class Settings {
             "overlayShowTimer": true,
         ])
         migrateLegacyAISettings()
-        migrateLegacyLicenseStorage()
+        purgeLegacyLicensingData()
+        migrateSpeechModelSetting()
     }
 
     var hotkeyIndex: Int {
@@ -231,24 +117,21 @@ class Settings {
         set { defaults.set(newValue, forKey: "aiCustomPrompt") }
     }
 
-    var whisperModel: String {
-        get { defaults.string(forKey: "whisperModel") ?? "large-v3-turbo-q5_0" }
-        set { defaults.set(newValue, forKey: "whisperModel") }
+    // Catalog id of the speech model (see ModelCatalog). Replaces the legacy
+    // "whisperModel" key; migrated in migrateSpeechModelSetting().
+    var speechModelID: String {
+        get { defaults.string(forKey: "speechModel") ?? ModelCatalog.parakeet.id }
+        set { defaults.set(newValue, forKey: "speechModel") }
     }
 
-    // Free-text user vocabulary (names, acronyms, technical terms) injected
-    // into whisper's --prompt so the decoder biases toward these words.
+    var speechModel: ModelSpec { ModelCatalog.speech(id: speechModelID) }
+
+    // Free-text user vocabulary (names, acronyms, technical terms). Whisper
+    // takes it as a decoder prompt; for every model it also restores the
+    // user's spelling after transcription (TextCleanup.applyVocabulary).
     var customVocabulary: String {
         get { defaults.string(forKey: "customVocabulary") ?? "" }
         set { defaults.set(newValue, forKey: "customVocabulary") }
-    }
-
-    var whisperModelPath: String {
-        // 1. Check app bundle (self-contained DMG)
-        let bundled = (Bundle.main.resourcePath ?? "") + "/ggml-\(whisperModel).bin"
-        if FileManager.default.fileExists(atPath: bundled) { return bundled }
-        // 2. Fall back to Application Support
-        return NSHomeDirectory() + "/Library/Application Support/Voice/Models/ggml-\(whisperModel).bin"
     }
 
     var micDeviceUID: String {
@@ -363,77 +246,11 @@ class Settings {
         set { defaults.set(newValue, forKey: "onboardingComplete") }
     }
 
-    // Word Limit (freemium)
-    let freeWeeklyLimit = 2000
-
-    var wordsThisWeek: Int {
-        get { defaults.integer(forKey: "wordsThisWeek") }
-        set { defaults.set(newValue, forKey: "wordsThisWeek") }
-    }
-
-    var weekResetDate: Date? {
-        get { defaults.object(forKey: "weekResetDate") as? Date }
-        set { defaults.set(newValue, forKey: "weekResetDate") }
-    }
-
-    func addWords(_ count: Int) {
-        resetWeekIfNeeded()
-        wordsThisWeek += count
-    }
-
-    var wordsRemaining: Int {
-        resetWeekIfNeeded()
-        return max(0, freeWeeklyLimit - wordsThisWeek)
-    }
-
-    var isOverLimit: Bool {
-        resetWeekIfNeeded()
-        return wordsThisWeek >= freeWeeklyLimit
-    }
-
-    private func resetWeekIfNeeded() {
-        let calendar = Calendar.current
-        if let resetDate = weekResetDate {
-            // Reset if we're in a different week (Monday-based)
-            if !calendar.isDate(resetDate, equalTo: Date(), toGranularity: .weekOfYear) {
-                wordsThisWeek = 0
-                weekResetDate = Date()
-            }
-        } else {
-            weekResetDate = Date()
-        }
-    }
-
-    // Trial & License
-    var trialStartDate: Date? {
-        get { defaults.object(forKey: "trialStartDate") as? Date }
-        set { defaults.set(newValue, forKey: "trialStartDate") }
-    }
-
-    var licenseKey: String {
-        get { KeychainStore.string(for: licenseKeyAccount) }
-        set { _ = KeychainStore.set(newValue, for: licenseKeyAccount) }
-    }
-
-    var licenseInstanceId: String {
-        get { KeychainStore.string(for: licenseInstanceIdAccount) }
-        set { _ = KeychainStore.set(newValue, for: licenseInstanceIdAccount) }
-    }
-
-    var hasStoredLicenseCredentials: Bool {
-        !licenseKey.isEmpty && !licenseInstanceId.isEmpty
-    }
-
-    var lastLicenseValidation: Date? {
-        get { defaults.object(forKey: "lastLicenseValidation") as? Date }
-        set { defaults.set(newValue, forKey: "lastLicenseValidation") }
-    }
-
     func resetAll() {
-        // Reset user-facing settings to defaults (preserves license/trial data)
+        // Reset user-facing settings to defaults (preserves saved transcripts)
         let keysToReset = [
             "hotkeyIndex", "soundsEnabled", "autoStartOnLogin", "popoTimeout",
-            "clipboardRestore", "aiEnabled", "aiModelOllama", "whisperModel",
+            "clipboardRestore", "aiEnabled", "aiModelOllama", "whisperModel", "speechModel",
             "aiCustomPrompt", "micDeviceUID", "overlayShowAppName", "overlayShowAppIcon",
             "overlayShowWindowTitle", "overlayShowTimer",
             "overlayEnabled", "overlayBackgroundOpacity", "overlayFontSize",
@@ -461,20 +278,35 @@ class Settings {
         }
     }
 
-    private func migrateLegacyLicenseStorage() {
-        let legacyKey = defaults.string(forKey: "licenseKey") ?? ""
-        let legacyInstanceId = defaults.string(forKey: "licenseInstanceId") ?? ""
+    // Pre-3.3 installs chose among Whisper variants. Users with custom
+    // vocabulary keep Whisper (only it can take the biasing prompt); everyone
+    // else moves to Parakeet, which matches Whisper's accuracy ~10x faster.
+    private func migrateSpeechModelSetting() {
+        guard defaults.string(forKey: "speechModel") == nil,
+              defaults.string(forKey: "whisperModel") != nil else { return }
+        let hasVocabulary = !customVocabulary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        speechModelID = hasVocabulary ? ModelCatalog.whisperTurbo.id : ModelCatalog.parakeet.id
+        defaults.removeObject(forKey: "whisperModel")
+    }
 
-        if licenseKey.isEmpty && !legacyKey.isEmpty {
-            licenseKey = legacyKey
+    // Voice is free and open source (GPL-3.0) since 3.3. Remove what the old
+    // license / weekly-word-limit system stored: usage counters, trial date and
+    // the LemonSqueezy license key in the Keychain.
+    private func purgeLegacyLicensingData() {
+        guard !defaults.bool(forKey: "licensingDataPurged") else { return }
+        for key in ["wordsThisWeek", "weekResetDate", "trialStartDate", "lastLicenseValidation",
+                    "licenseKey", "licenseInstanceId", "isLicensed"] {
+            defaults.removeObject(forKey: key)
         }
-        if licenseInstanceId.isEmpty && !legacyInstanceId.isEmpty {
-            licenseInstanceId = legacyInstanceId
+        for account in ["license-key", "license-instance-id"] {
+            let query: [CFString: Any] = [
+                kSecClass: kSecClassGenericPassword,
+                kSecAttrService: "com.faradaysoft.voice",
+                kSecAttrAccount: account,
+            ]
+            SecItemDelete(query as CFDictionary)
         }
-
-        defaults.removeObject(forKey: "licenseKey")
-        defaults.removeObject(forKey: "licenseInstanceId")
-        defaults.removeObject(forKey: "isLicensed")
+        defaults.set(true, forKey: "licensingDataPurged")
     }
 
     func updateLaunchAgent(enabled: Bool) {
@@ -638,7 +470,11 @@ struct AppContext {
 
 func cleanupSystemPrompt(appContext: AppContext) -> String {
     let custom = Settings.shared.aiCustomPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-    let customLine = custom.isEmpty ? "" : "\n    Additional instructions: \(custom)"
+    let vocab = Settings.shared.customVocabulary.trimmingCharacters(in: .whitespacesAndNewlines)
+    var customLine = custom.isEmpty ? "" : "\n    Additional instructions: \(custom)"
+    if !vocab.isEmpty {
+        customLine += "\n    Spell these terms exactly as written: \(String(vocab.prefix(300)))"
+    }
     // Few-shot framing is load-bearing. Instruction-tuned small models
     // (even Qwen 1.5B) otherwise respond to message-shaped input as if
     // chatting. Input/Output examples force the model into rewriter mode.
@@ -664,6 +500,29 @@ func cleanupSystemPrompt(appContext: AppContext) -> String {
     - Output plain text only. No lists, bullets, numbering, markdown, commentary, or preamble.
     Context: written in \(appContext.appName).\(customLine)
     """
+}
+
+// Raw ASR text -> text to paste. Hesitations ("um", "uh") are removed
+// deterministically; the LLM only runs when the text needs judgment (ambiguous
+// fillers, self-corrections, stutters), and its output is only used if it is
+// still a faithful rewrite. Clean dictation never touches the model, so it
+// can't be paraphrased. Blocks; call off the main thread.
+func polishTranscript(_ raw: String, appContext: AppContext) -> String {
+    let vocabulary = Settings.shared.customVocabulary
+    let text = TextCleanup.applyVocabulary(TextCleanup.removeHesitations(raw), vocabulary: vocabulary)
+    // Very long dictation (~1000+ tokens) would crowd the model's context and
+    // take seconds; it gets deterministic cleanup only.
+    guard Settings.shared.aiEnabled, text.count <= 4000, TextCleanup.needsModel(text) else { return text }
+
+    let prompt = cleanupSystemPrompt(appContext: appContext)
+    guard let output = SpeechEngine.shared.generateCleanup(text, systemPrompt: prompt) else {
+        return text
+    }
+    guard let accepted = TextCleanup.acceptModelOutput(output, for: text) else {
+        NSLog("Voice: rejected cleanup output that drifted from the transcript")
+        return text
+    }
+    return TextCleanup.applyVocabulary(accepted, vocabulary: vocabulary)
 }
 
 // MARK: - Input Monitor (CGEventTap for fn key)
@@ -1445,497 +1304,88 @@ class TextInjector {
     }
 }
 
-// MARK: - Local LLM Client
-
-class LlamaClient {
-    private let modelFileName = "qwen2.5-1.5b-instruct-q4_0.gguf"
-    private var isAvailable = false
-
-    var llamaPath: String {
-        let bundled = Bundle.main.resourcePath! + "/llama-completion"
-        if FileManager.default.fileExists(atPath: bundled) { return bundled }
-        for path in ["/opt/homebrew/bin/llama-completion", "/usr/local/bin/llama-completion"] {
-            if FileManager.default.fileExists(atPath: path) { return path }
-        }
-        return bundled
-    }
-
-    var modelPath: String {
-        // 1. Check app bundle (self-contained DMG)
-        let bundled = (Bundle.main.resourcePath ?? "") + "/\(modelFileName)"
-        if FileManager.default.fileExists(atPath: bundled) { return bundled }
-        // 2. Fall back to Application Support
-        return NSHomeDirectory() + "/Library/Application Support/Voice/Models/\(modelFileName)"
-    }
-
-    func healthCheck(completion: @escaping (Bool) -> Void) {
-        let available = FileManager.default.fileExists(atPath: llamaPath)
-                     && FileManager.default.fileExists(atPath: modelPath)
-        isAvailable = available
-        completion(available)
-    }
-
-    func warmup() {
-        // No warmup needed — model loads on demand per invocation
-    }
-
-    func cleanupText(_ text: String, appContext: AppContext, completion: @escaping (String) -> Void) {
-        guard isAvailable else {
-            completion(text)
-            return
-        }
-
-        let truncated = String(text.prefix(4000))
-        let systemPrompt = cleanupSystemPrompt(appContext: appContext)
-
-        generate(system: systemPrompt, prompt: truncated) { result in
-            completion(result ?? text)
-        }
-    }
-
-    func testConnection(completion: @escaping (Bool, String) -> Void) {
-        healthCheck { available in
-            if available {
-                completion(true, "Built-in AI model ready")
-            } else {
-                var missing: [String] = []
-                if !FileManager.default.fileExists(atPath: self.llamaPath) { missing.append("llama-completion binary") }
-                if !FileManager.default.fileExists(atPath: self.modelPath) { missing.append("AI model") }
-                completion(false, "Missing: \(missing.joined(separator: ", "))")
-            }
-        }
-    }
-
-    private func generate(system: String, prompt: String, completion: @escaping (String?) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async { [self] in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: llamaPath)
-            process.arguments = [
-                "-m", modelPath,
-                "-sys", system,
-                "-p", prompt,
-                "-n", "2048",
-                "--temp", "0.1",
-                "-ngl", "99",
-                "--no-display-prompt"
-            ]
-
-            // Point to bundled ggml backend plugins if running from app bundle
-            var env = ProcessInfo.processInfo.environment
-            let bundleFrameworks = Bundle.main.bundlePath + "/Contents/Frameworks/llama"
-            if FileManager.default.fileExists(atPath: bundleFrameworks) {
-                env["GGML_BACKEND_PATH"] = bundleFrameworks + "/backends"
-            }
-            process.environment = env
-
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = FileHandle.nullDevice
-
-            do {
-                try process.run()
-                // Qwen 0.5B on M-series runs in 1-3s; 20s covers the worst case.
-                let completed = runWithTimeout(process, timeout: 20)
-                if !completed {
-                    completion(nil)
-                    return
-                }
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                var output = String(data: data, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                // Strip trailing "> EOF by user" artifact from llama-completion
-                if output.hasSuffix("> EOF by user") {
-                    output = output.replacingOccurrences(of: "\n> EOF by user", with: "")
-                        .replacingOccurrences(of: "> EOF by user", with: "")
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                }
-                completion(output.isEmpty ? nil : output)
-            } catch {
-                NSLog("Voice: llama-completion failed: %@", error.localizedDescription)
-                completion(nil)
-            }
-        }
-    }
-}
-
-// MARK: - License Manager
-
-enum LicenseState {
-    case free(wordsLeft: Int)
-    case limitReached
-    case licensed
-    case offlineGrace  // licensed but can't re-validate, working but warning
-    case invalid
-}
-
-class LicenseManager {
-    static let shared = LicenseManager()
-
-    private let lsProductId: Int = 912013
-    let checkoutURL = ObfuscatedStrings.checkoutURL
-
-    private let revalidationIntervalDays = 7
-    private let offlineGraceDays = 3
-
-    private init() {}
-
-    private var hasStoredLicenseCredentials: Bool {
-        Settings.shared.hasStoredLicenseCredentials
-    }
-
-    // MARK: - State
-
-    var currentState: LicenseState {
-        // If licensed, check revalidation
-        if hasStoredLicenseCredentials {
-            guard let lastCheck = Settings.shared.lastLicenseValidation else {
-                return .offlineGrace
-            }
-            let daysSince = Date().timeIntervalSince(lastCheck) / 86400
-            if daysSince > Double(revalidationIntervalDays + offlineGraceDays) {
-                return .invalid  // too long without validation
-            } else if daysSince > Double(revalidationIntervalDays) {
-                return .offlineGrace
-            }
-            return .licensed
-        }
-
-        // Free tier word limit
-        let remaining = Settings.shared.wordsRemaining
-        if remaining <= 0 {
-            return .limitReached
-        }
-        return .free(wordsLeft: remaining)
-    }
-
-    var canRecord: Bool {
-        switch currentState {
-        case .free, .licensed, .offlineGrace:
-            return true
-        case .limitReached, .invalid:
-            return false
-        }
-    }
-
-    var statusText: String {
-        switch currentState {
-        case .free(let wordsLeft):
-            let used = Settings.shared.freeWeeklyLimit - wordsLeft
-            return "\(used) / \(Settings.shared.freeWeeklyLimit) words"
-        case .limitReached: return "Weekly limit reached"
-        case .licensed: return "Licensed"
-        case .offlineGrace: return "Licensed (offline)"
-        case .invalid: return "License invalid"
-        }
-    }
-
-    // MARK: - Activation
-
-    func activate(key: String, completion: @escaping (Bool, String) -> Void) {
-        guard let url = URL(string: ObfuscatedStrings.activateURL) else {
-            completion(false, "Invalid URL")
-            return
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        let machineName = Host.current().localizedName ?? "Mac"
-        let body = "license_key=\(key)&instance_name=\(machineName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "Mac")"
-        request.httpBody = body.data(using: .utf8)
-        request.timeoutInterval = 15
-
-        URLSession.shared.dataTask(with: request) { data, _, error in
-            guard error == nil, let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                DispatchQueue.main.async { completion(false, error?.localizedDescription ?? "Network error") }
-                return
-            }
-
-            let activated = json["activated"] as? Bool ?? false
-            let instanceId = (json["instance"] as? [String: Any])?["id"] as? String
-            let licenseStatus = (json["license_key"] as? [String: Any])?["status"] as? String
-
-            if activated, let instanceId = instanceId, licenseStatus == "active" {
-                Settings.shared.licenseKey = key
-                Settings.shared.licenseInstanceId = instanceId
-                Settings.shared.lastLicenseValidation = Date()
-                DispatchQueue.main.async { completion(true, "License activated!") }
-            } else {
-                let errorMsg = (json["error"] as? String) ?? "Activation failed"
-                DispatchQueue.main.async { completion(false, errorMsg) }
-            }
-        }.resume()
-    }
-
-    // MARK: - Validation
-
-    func validateIfNeeded() {
-        guard hasStoredLicenseCredentials else { return }
-        guard let lastCheck = Settings.shared.lastLicenseValidation else {
-            validateOnline()
-            return
-        }
-        let daysSince = Date().timeIntervalSince(lastCheck) / 86400
-        if daysSince >= Double(revalidationIntervalDays) {
-            validateOnline()
-        }
-    }
-
-    private func validateOnline() {
-        guard let url = URL(string: ObfuscatedStrings.validateURL) else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        let body = "license_key=\(Settings.shared.licenseKey)&instance_id=\(Settings.shared.licenseInstanceId)"
-        request.httpBody = body.data(using: .utf8)
-        request.timeoutInterval = 15
-
-        URLSession.shared.dataTask(with: request) { data, _, error in
-            guard error == nil, let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                // Network error — rely on cached state + offline grace
-                return
-            }
-            let valid = json["valid"] as? Bool ?? false
-            if valid {
-                Settings.shared.lastLicenseValidation = Date()
-            } else {
-                // License revoked or invalid — clear licensed state
-                self.deactivate()
-            }
-        }.resume()
-    }
-
-    // MARK: - Deactivation
-
-    func deactivate() {
-        Settings.shared.licenseKey = ""
-        Settings.shared.licenseInstanceId = ""
-        Settings.shared.lastLicenseValidation = nil
-    }
-}
-
-// MARK: - License Expiry Modal
-
-class LicenseExpiryWindowController {
-    static let shared = LicenseExpiryWindowController()
-    private var window: NSWindow?
-
-    func show() {
-        if let w = window, w.isVisible {
-            w.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-
-        let w = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 300),
-            styleMask: [.titled],  // no close — must enter key or quit
-            backing: .buffered,
-            defer: false
-        )
-        w.title = "Voice"
-        w.center()
-        w.isReleasedWhenClosed = false
-        w.isRestorable = false
-
-        let contentView = NSView(frame: w.contentView!.bounds)
-        contentView.autoresizingMask = [.width, .height]
-
-        // Title
-        let title = NSTextField(labelWithString: "Weekly limit reached")
-        title.font = .systemFont(ofSize: 20, weight: .bold)
-        title.alignment = .center
-        title.frame = NSRect(x: 40, y: 230, width: 340, height: 30)
-        contentView.addSubview(title)
-
-        // Word count progress
-        let used = Settings.shared.wordsThisWeek
-        let limit = Settings.shared.freeWeeklyLimit
-        let subtitle = NSTextField(wrappingLabelWithString: "You've used \(used) of \(limit) free words this week.\nUpgrade for unlimited dictation, or wait until Monday.")
-        subtitle.font = .systemFont(ofSize: 13)
-        subtitle.textColor = .secondaryLabelColor
-        subtitle.alignment = .center
-        subtitle.frame = NSRect(x: 40, y: 180, width: 340, height: 50)
-        contentView.addSubview(subtitle)
-
-        // Progress bar
-        let progressBar = NSProgressIndicator(frame: NSRect(x: 60, y: 170, width: 300, height: 6))
-        progressBar.style = .bar
-        progressBar.minValue = 0
-        progressBar.maxValue = Double(limit)
-        progressBar.doubleValue = min(Double(used), Double(limit))
-        progressBar.isIndeterminate = false
-        contentView.addSubview(progressBar)
-
-        // License key field (per D-12)
-        let keyField = NSTextField(frame: NSRect(x: 60, y: 150, width: 300, height: 28))
-        keyField.placeholderString = "Enter license key"
-        keyField.font = .systemFont(ofSize: 13)
-        contentView.addSubview(keyField)
-
-        // Status label
-        let statusLabel = NSTextField(labelWithString: "")
-        statusLabel.font = .systemFont(ofSize: 12)
-        statusLabel.alignment = .center
-        statusLabel.frame = NSRect(x: 60, y: 125, width: 300, height: 20)
-        contentView.addSubview(statusLabel)
-
-        // Activate button
-        let activateBtn = NSButton(title: "Activate", target: nil, action: nil)
-        activateBtn.frame = NSRect(x: 170, y: 85, width: 100, height: 32)
-        activateBtn.bezelStyle = .rounded
-        activateBtn.keyEquivalent = "\r"  // Enter key
-        contentView.addSubview(activateBtn)
-
-        // Upgrade button: opens LemonSqueezy checkout
-        let buyBtn = NSButton(title: "Upgrade — $5/mo or $39/yr", target: nil, action: nil)
-        buyBtn.frame = NSRect(x: 100, y: 45, width: 220, height: 32)
-        buyBtn.bezelStyle = .rounded
-        buyBtn.contentTintColor = .controlAccentColor
-        contentView.addSubview(buyBtn)
-
-        // OK button — dismiss (app still works, just can't transcribe more this week)
-        let okBtn = NSButton(title: "OK", target: nil, action: nil)
-        okBtn.frame = NSRect(x: 20, y: 15, width: 80, height: 28)
-        okBtn.bezelStyle = .rounded
-        contentView.addSubview(okBtn)
-
-        // Wire activate action using a helper class to capture references
-        class ActivateHandler: NSObject {
-            let keyField: NSTextField
-            let statusLabel: NSTextField
-            weak var window: NSWindow?
-            init(keyField: NSTextField, statusLabel: NSTextField, window: NSWindow?) {
-                self.keyField = keyField; self.statusLabel = statusLabel; self.window = window
-            }
-            @objc func activate() {
-                let key = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !key.isEmpty else {
-                    statusLabel.stringValue = "Please enter a license key"
-                    statusLabel.textColor = .systemOrange
-                    return
-                }
-                statusLabel.stringValue = "Activating..."
-                statusLabel.textColor = .secondaryLabelColor
-                LicenseManager.shared.activate(key: key) { [weak self] success, message in
-                    self?.statusLabel.stringValue = message
-                    self?.statusLabel.textColor = success ? .systemGreen : .systemRed
-                    if success {
-                        // Per D-14: dismiss modal and app functions normally
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                            self?.window?.close()
-                            LicenseExpiryWindowController.shared.window = nil
-                        }
-                    }
-                }
-            }
-        }
-        let handler = ActivateHandler(keyField: keyField, statusLabel: statusLabel, window: w)
-        // Prevent dealloc by storing as associated object
-        objc_setAssociatedObject(w, "activateHandler", handler, .OBJC_ASSOCIATION_RETAIN)
-        activateBtn.target = handler
-        activateBtn.action = #selector(ActivateHandler.activate)
-
-        // Wire buy action
-        class BuyHandler: NSObject {
-            @objc func buy() {
-                if let url = URL(string: LicenseManager.shared.checkoutURL) {
-                    NSWorkspace.shared.open(url)
-                }
-            }
-        }
-        let buyHandler = BuyHandler()
-        objc_setAssociatedObject(w, "buyHandler", buyHandler, .OBJC_ASSOCIATION_RETAIN)
-        buyBtn.target = buyHandler
-        buyBtn.action = #selector(BuyHandler.buy)
-
-        // Wire OK button to dismiss
-        class OKHandler: NSObject {
-            weak var window: NSWindow?
-            init(window: NSWindow?) { self.window = window }
-            @objc func dismiss() { window?.close() }
-        }
-        let okHandler = OKHandler(window: w)
-        objc_setAssociatedObject(w, "okHandler", okHandler, .OBJC_ASSOCIATION_RETAIN)
-        okBtn.target = okHandler
-        okBtn.action = #selector(OKHandler.dismiss)
-
-        w.contentView = contentView
-        w.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        window = w
-    }
-}
-
 // MARK: - Model Download Window
 
+// Downloads catalog models one at a time with a progress window. Each file is
+// SHA-256 verified before it is moved into place, so a truncated or tampered
+// download never reaches the C++ model loaders.
 class ModelDownloadWindowController: NSObject, URLSessionDownloadDelegate {
     static let shared = ModelDownloadWindowController()
 
     private var window: NSWindow?
+    private var titleLabel: NSTextField?
+    private var subtitleLabel: NSTextField?
     private var progressBar: NSProgressIndicator?
     private var statusLabel: NSTextField?
-    private var downloadTask: URLSessionDownloadTask?
-    private var completion: (() -> Void)?
+    private var retryButton: NSButton?
+    private var session: URLSession?
+    private var queue: [ModelSpec] = []
+    private var completions: [() -> Void] = []
 
-    func ensureModel(completion: @escaping () -> Void) {
-        // Already have the model — nothing to do
-        if FileManager.default.fileExists(atPath: Settings.shared.whisperModelPath) {
+    /// Calls `completion` once every model in `specs` is installed. Missing
+    /// models are downloaded; calls made while a download is running join it.
+    func ensureModels(_ specs: [ModelSpec], completion: @escaping () -> Void) {
+        let missing = specs.filter { spec in
+            !spec.isInstalled && !queue.contains { $0.id == spec.id }
+        }
+        let busy = !queue.isEmpty
+        if missing.isEmpty && !busy {
             completion()
             return
         }
-        // Check bundled model in app Resources
-        let bundled = (Bundle.main.resourcePath ?? "") + "/ggml-\(Settings.shared.whisperModel).bin"
-        if FileManager.default.fileExists(atPath: bundled) {
-            completion()
-            return
+        queue.append(contentsOf: missing)
+        completions.append(completion)
+        if !busy {
+            showWindow()
+            startNext()
         }
-        self.completion = completion
-        showWindow()
-        startDownload()
     }
 
+    private var current: ModelSpec? { queue.first }
+
     private func showWindow() {
+        if let window {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
         let w = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 160),
             styleMask: [.titled],
             backing: .buffered,
             defer: false
         )
-        w.title = "Downloading Speech Model"
+        w.title = "Downloading Models"
         w.center()
         w.isReleasedWhenClosed = false
         w.level = .floating
 
         guard let contentView = w.contentView else { return }
 
-        let title = NSTextField(labelWithString: "Downloading speech recognition model...")
+        let title = NSTextField(labelWithString: "")
         title.font = NSFont.boldSystemFont(ofSize: 14)
         title.frame = NSRect(x: 30, y: 110, width: 360, height: 22)
         contentView.addSubview(title)
+        titleLabel = title
 
-        let subtitle = NSTextField(wrappingLabelWithString: "This is a one-time download (~547 MB). Voice needs this model to transcribe speech locally on your Mac.")
+        let subtitle = NSTextField(wrappingLabelWithString: "")
         subtitle.font = NSFont.systemFont(ofSize: 12)
         subtitle.textColor = .secondaryLabelColor
         subtitle.frame = NSRect(x: 30, y: 68, width: 360, height: 36)
         contentView.addSubview(subtitle)
+        subtitleLabel = subtitle
 
         let bar = NSProgressIndicator(frame: NSRect(x: 30, y: 44, width: 360, height: 20))
         bar.style = .bar
         bar.isIndeterminate = false
         bar.minValue = 0
         bar.maxValue = 100
-        bar.doubleValue = 0
         contentView.addSubview(bar)
         progressBar = bar
 
-        let status = NSTextField(labelWithString: "Starting download...")
+        let status = NSTextField(labelWithString: "")
         status.font = NSFont.systemFont(ofSize: 11)
         status.textColor = .secondaryLabelColor
-        status.frame = NSRect(x: 30, y: 18, width: 360, height: 18)
+        status.frame = NSRect(x: 30, y: 18, width: 250, height: 18)
         contentView.addSubview(status)
         statusLabel = status
 
@@ -1945,98 +1395,115 @@ class ModelDownloadWindowController: NSObject, URLSessionDownloadDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func startDownload() {
-        let modelName = Settings.shared.whisperModel
-        let urlString = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-\(modelName).bin"
-        guard let url = URL(string: urlString) else {
-            statusLabel?.stringValue = "Error: invalid download URL"
-            return
+    private func startNext() {
+        guard let spec = current, let url = URL(string: spec.url) else { return }
+        let purpose = spec.role == .speech ? "speech recognition" : "AI text cleanup"
+        titleLabel?.stringValue = "Downloading \(purpose) model..."
+        subtitleLabel?.stringValue = "One-time download (\(spec.sizeDescription)). Voice runs this model locally on your Mac — your audio never leaves it."
+        statusLabel?.textColor = .secondaryLabelColor
+        statusLabel?.stringValue = "Starting download..."
+        progressBar?.doubleValue = 0
+        retryButton?.removeFromSuperview()
+        retryButton = nil
+
+        try? FileManager.default.createDirectory(atPath: ModelSpec.modelDirectory, withIntermediateDirectories: true)
+        if session == nil {
+            session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
         }
-
-        let modelDir = NSHomeDirectory() + "/Library/Application Support/Voice/Models"
-        try? FileManager.default.createDirectory(atPath: modelDir, withIntermediateDirectories: true)
-
-        let config = URLSessionConfiguration.default
-        let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
-        downloadTask = session.downloadTask(with: url)
-        downloadTask?.resume()
+        session?.downloadTask(with: url).resume()
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                     didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
                     totalBytesExpectedToWrite: Int64) {
         DispatchQueue.main.async {
-            if totalBytesExpectedToWrite > 0 {
-                let pct = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite) * 100
-                self.progressBar?.doubleValue = pct
-                let mbDone = Double(totalBytesWritten) / 1_048_576
-                let mbTotal = Double(totalBytesExpectedToWrite) / 1_048_576
-                self.statusLabel?.stringValue = String(format: "%.0f / %.0f MB (%.0f%%)", mbDone, mbTotal, pct)
-            } else {
-                let mbDone = Double(totalBytesWritten) / 1_048_576
-                self.statusLabel?.stringValue = String(format: "%.0f MB downloaded...", mbDone)
-            }
+            let total = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : (self.current?.bytes ?? 0)
+            guard total > 0 else { return }
+            let pct = Double(totalBytesWritten) / Double(total) * 100
+            self.progressBar?.doubleValue = pct
+            self.statusLabel?.stringValue = String(format: "%.0f / %.0f MB (%.0f%%)",
+                                                   Double(totalBytesWritten) / 1_048_576, Double(total) / 1_048_576, pct)
         }
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                     didFinishDownloadingTo location: URL) {
-        let modelName = Settings.shared.whisperModel
-        let modelDir = NSHomeDirectory() + "/Library/Application Support/Voice/Models"
-        let dest = "\(modelDir)/ggml-\(modelName).bin"
-
+        // The temp file is deleted when this method returns, so move it now
+        // and verify afterwards.
+        guard let spec = DispatchQueue.main.sync(execute: { current }) else { return }
+        let partial = spec.downloadPath + ".partial"
+        try? FileManager.default.removeItem(atPath: partial)
         do {
-            if FileManager.default.fileExists(atPath: dest) {
-                try FileManager.default.removeItem(atPath: dest)
-            }
-            try FileManager.default.moveItem(at: location, to: URL(fileURLWithPath: dest))
-            DispatchQueue.main.async {
-                self.statusLabel?.stringValue = "Download complete!"
-                self.progressBar?.doubleValue = 100
-                // Brief pause so user sees "complete", then close
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    self.window?.close()
-                    self.window = nil
-                    // Revert to accessory if onboarding is done
-                    if Settings.shared.onboardingComplete {
-                        NSApp.setActivationPolicy(.accessory)
-                    }
-                    self.completion?()
-                    self.completion = nil
-                }
-            }
+            try FileManager.default.moveItem(at: location, to: URL(fileURLWithPath: partial))
         } catch {
-            DispatchQueue.main.async {
-                self.statusLabel?.stringValue = "Error: \(error.localizedDescription)"
-                self.statusLabel?.textColor = .systemRed
+            fail("Error: \(error.localizedDescription)")
+            return
+        }
+
+        DispatchQueue.main.async { self.statusLabel?.stringValue = "Verifying..." }
+        guard sha256Hex(ofFileAt: partial) == spec.sha256 else {
+            try? FileManager.default.removeItem(atPath: partial)
+            NSLog("Voice: checksum mismatch for %@", spec.fileName)
+            fail("Download was corrupted — please retry")
+            return
+        }
+        do {
+            try? FileManager.default.removeItem(atPath: spec.downloadPath)
+            try FileManager.default.moveItem(atPath: partial, toPath: spec.downloadPath)
+        } catch {
+            fail("Error: \(error.localizedDescription)")
+            return
+        }
+
+        DispatchQueue.main.async {
+            self.queue.removeFirst()
+            if self.queue.isEmpty {
+                self.finish()
+            } else {
+                self.startNext()
             }
         }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        guard let error = error else { return }
+        guard let error else { return }
+        fail("Download failed: \(error.localizedDescription)")
+    }
+
+    private func fail(_ message: String) {
         DispatchQueue.main.async {
-            self.statusLabel?.stringValue = "Download failed: \(error.localizedDescription)"
+            self.statusLabel?.stringValue = message
             self.statusLabel?.textColor = .systemRed
-            // Add retry button
-            let retryBtn = NSButton(frame: NSRect(x: 160, y: 18, width: 100, height: 24))
-            retryBtn.title = "Retry"
-            retryBtn.bezelStyle = .rounded
-            retryBtn.target = self
-            retryBtn.action = #selector(self.retryDownload)
-            self.window?.contentView?.addSubview(retryBtn)
+            guard self.retryButton == nil else { return }
+            let retry = NSButton(frame: NSRect(x: 290, y: 14, width: 100, height: 24))
+            retry.title = "Retry"
+            retry.bezelStyle = .rounded
+            retry.target = self
+            retry.action = #selector(self.retryDownload)
+            self.window?.contentView?.addSubview(retry)
+            self.retryButton = retry
+        }
+    }
+
+    private func finish() {
+        statusLabel?.stringValue = "Download complete!"
+        progressBar?.doubleValue = 100
+        // Brief pause so user sees "complete", then close
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            self.window?.close()
+            self.window = nil
+            // Revert to accessory if onboarding is done
+            if Settings.shared.onboardingComplete {
+                NSApp.setActivationPolicy(.accessory)
+            }
+            let done = self.completions
+            self.completions = []
+            done.forEach { $0() }
         }
     }
 
     @objc private func retryDownload() {
-        statusLabel?.textColor = .secondaryLabelColor
-        statusLabel?.stringValue = "Retrying..."
-        progressBar?.doubleValue = 0
-        // Remove retry button
-        for v in window?.contentView?.subviews ?? [] {
-            if let btn = v as? NSButton, btn.title == "Retry" { btn.removeFromSuperview() }
-        }
-        startDownload()
+        startNext()
     }
 }
 
@@ -2638,13 +2105,6 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
     private var transcriptResults: [(date: Date, text: String, path: String)] = []
     private var transcriptCountLabel: NSTextField!
 
-    // License tab controls
-    private var licenseStatusLabel = NSTextField(labelWithString: "")
-    private var licenseKeyField = NSTextField()
-    private var activateButton = NSButton(title: "Activate", target: nil, action: nil)
-    private var deactivateButton = NSButton(title: "Deactivate", target: nil, action: nil)
-    private var licenseResultLabel = NSTextField(labelWithString: "")
-
     override func loadView() {
         self.view = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 380))
     }
@@ -2660,7 +2120,6 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         tabView.addTabViewItem(makeGeneralTab())
         tabView.addTabViewItem(makeAITab())
         tabView.addTabViewItem(makeTranscriptionTab())
-        tabView.addTabViewItem(makeLicenseTab())
 
         // Listen for audio device changes (per D-06: live mic list updates)
         var propAddr = AudioObjectPropertyAddress(
@@ -2913,9 +2372,11 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
     private func makeAITab() -> NSTabViewItem {
         let item = NSTabViewItem(identifier: "ai")
         item.label = "AI"
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 450, height: 400))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 450, height: 320))
 
-        var y: CGFloat = 360
+        // The tab content area is ~320pt tall and AppKit clips from the top,
+        // so everything must sit below ~306 like the other tabs.
+        var y: CGFloat = 284
 
         // Local AI text cleanup toggle
         aiEnabledCheckbox = NSButton(checkboxWithTitle: "AI text cleanup", target: self, action: #selector(aiEnabledChanged))
@@ -2923,7 +2384,7 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         aiEnabledCheckbox.state = Settings.shared.aiEnabled ? .on : .off
         container.addSubview(aiEnabledCheckbox)
 
-        y -= 26
+        y -= 4
 
         // Description
         let desc = NSTextField(wrappingLabelWithString: "Cleans up grammar, removes filler words (um, uh, like), and handles corrections. Runs entirely on your Mac — nothing is sent to the cloud.")
@@ -2943,10 +2404,10 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         promptHint.font = NSFont.systemFont(ofSize: 10)
         container.addSubview(promptHint)
 
-        y -= 34
+        y -= 28
 
         aiCustomPromptField = NSTextField(string: Settings.shared.aiCustomPrompt)
-        aiCustomPromptField.frame = NSRect(x: 20, y: y - 40, width: 410, height: 60)
+        aiCustomPromptField.frame = NSRect(x: 20, y: y - 34, width: 410, height: 44)
         aiCustomPromptField.placeholderString = "Add custom instructions for AI text cleanup..."
         aiCustomPromptField.font = NSFont.systemFont(ofSize: 12)
         aiCustomPromptField.usesSingleLineMode = false
@@ -2955,21 +2416,22 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         aiCustomPromptField.delegate = self
         container.addSubview(aiCustomPromptField)
 
-        y -= 72
+        y -= 58
 
-        // Custom transcription vocabulary — biases whisper toward these words
+        // Custom vocabulary — restores spelling for every model; Whisper also
+        // uses it to bias recognition
         addLabel("Custom vocabulary:", at: NSPoint(x: 20, y: y), in: container)
         y -= 4
-        let vocabHint = NSTextField(labelWithString: "Names, acronyms, technical terms — helps whisper recognize your jargon")
+        let vocabHint = NSTextField(labelWithString: "Names, acronyms, technical terms — fixes their spelling in your text")
         vocabHint.frame = NSRect(x: 20, y: y - 16, width: 410, height: 14)
         vocabHint.textColor = .tertiaryLabelColor
         vocabHint.font = NSFont.systemFont(ofSize: 10)
         container.addSubview(vocabHint)
 
-        y -= 34
+        y -= 28
 
         customVocabularyField = NSTextField(string: Settings.shared.customVocabulary)
-        customVocabularyField.frame = NSRect(x: 20, y: y - 40, width: 410, height: 60)
+        customVocabularyField.frame = NSRect(x: 20, y: y - 34, width: 410, height: 44)
         customVocabularyField.placeholderString = "Kubernetes, kubectl, faradaysoft, GGUF, whisper.cpp, ..."
         customVocabularyField.font = NSFont.systemFont(ofSize: 12)
         customVocabularyField.usesSingleLineMode = false
@@ -2991,12 +2453,14 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
 
         var y: CGFloat = 282
 
-        // Whisper model — compact row
+        // Speech model — compact row
         addLabel("Model:", at: NSPoint(x: 20, y: y), in: container)
         whisperPopup = NSPopUpButton(frame: NSRect(x: 75, y: y - 2, width: 200, height: 24), pullsDown: false)
-        let models = ["large-v3-turbo-q5_0", "small.en", "medium.en", "large-v3"]
-        for m in models { whisperPopup.addItem(withTitle: m) }
-        whisperPopup.selectItem(withTitle: Settings.shared.whisperModel)
+        for model in ModelCatalog.speechModels {
+            whisperPopup.addItem(withTitle: model.displayName)
+            whisperPopup.lastItem?.representedObject = model.id
+        }
+        whisperPopup.selectItem(at: ModelCatalog.speechModels.firstIndex { $0.id == Settings.shared.speechModelID } ?? 0)
         whisperPopup.target = self
         whisperPopup.action = #selector(whisperModelChanged)
         container.addSubview(whisperPopup)
@@ -3215,128 +2679,6 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         NSWorkspace.shared.open(URL(fileURLWithPath: dir))
     }
 
-    // MARK: - License Tab
-
-    private func makeLicenseTab() -> NSTabViewItem {
-        let item = NSTabViewItem(identifier: "license")
-        item.label = "License"
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 450, height: 300))
-
-        var y: CGFloat = 255
-
-        // Status indicator
-        addLabel("Status:", at: NSPoint(x: 20, y: y), in: container)
-        licenseStatusLabel.frame = NSRect(x: 180, y: y, width: 250, height: 22)
-        licenseStatusLabel.font = .systemFont(ofSize: 13)
-        updateLicenseStatusLabel()
-        container.addSubview(licenseStatusLabel)
-
-        y -= 44
-
-        // License key field
-        addLabel("License key:", at: NSPoint(x: 20, y: y), in: container)
-        licenseKeyField.frame = NSRect(x: 180, y: y - 2, width: 230, height: 26)
-        licenseKeyField.placeholderString = "XXXX-XXXX-XXXX-XXXX"
-        licenseKeyField.font = .systemFont(ofSize: 13)
-        if !Settings.shared.licenseKey.isEmpty {
-            licenseKeyField.stringValue = Settings.shared.licenseKey
-        }
-        container.addSubview(licenseKeyField)
-
-        y -= 44
-
-        // Activate button
-        activateButton.frame = NSRect(x: 180, y: y, width: 100, height: 28)
-        activateButton.bezelStyle = .rounded
-        activateButton.target = self
-        activateButton.action = #selector(activateLicense)
-        container.addSubview(activateButton)
-
-        // Deactivate button (only useful when licensed)
-        deactivateButton.frame = NSRect(x: 290, y: y, width: 120, height: 28)
-        deactivateButton.bezelStyle = .rounded
-        deactivateButton.target = self
-        deactivateButton.action = #selector(deactivateLicense)
-        deactivateButton.isEnabled = Settings.shared.hasStoredLicenseCredentials
-        container.addSubview(deactivateButton)
-
-        y -= 36
-
-        // Result label
-        licenseResultLabel.frame = NSRect(x: 20, y: y, width: 410, height: 20)
-        licenseResultLabel.font = .systemFont(ofSize: 12)
-        licenseResultLabel.alignment = .left
-        container.addSubview(licenseResultLabel)
-
-        y -= 50
-
-        // Buy button — solid blue
-        let buyBtn = NSButton(title: "Upgrade — $5/mo or $39/yr", target: self, action: #selector(openCheckout))
-        buyBtn.frame = NSRect(x: 20, y: y, width: 410, height: 36)
-        buyBtn.bezelStyle = .regularSquare
-        buyBtn.wantsLayer = true
-        buyBtn.layer?.backgroundColor = NSColor.systemBlue.cgColor
-        buyBtn.layer?.cornerRadius = 8
-        buyBtn.layer?.masksToBounds = true
-        buyBtn.isBordered = true
-        buyBtn.isTransparent = false
-        buyBtn.font = NSFont.boldSystemFont(ofSize: 14)
-        let attrTitle = NSAttributedString(string: "Upgrade — $5/mo or $39/yr", attributes: [
-            .foregroundColor: NSColor.white,
-            .font: NSFont.boldSystemFont(ofSize: 14)
-        ])
-        buyBtn.attributedTitle = attrTitle
-        container.addSubview(buyBtn)
-
-        item.view = container
-        return item
-    }
-
-    private func updateLicenseStatusLabel() {
-        let state = LicenseManager.shared.currentState
-        licenseStatusLabel.stringValue = LicenseManager.shared.statusText
-        switch state {
-        case .licensed: licenseStatusLabel.textColor = .systemGreen
-        case .offlineGrace: licenseStatusLabel.textColor = .systemYellow
-        case .free: licenseStatusLabel.textColor = .controlAccentColor
-        case .limitReached, .invalid: licenseStatusLabel.textColor = .systemRed
-        }
-    }
-
-    @objc private func activateLicense() {
-        let key = licenseKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else {
-            licenseResultLabel.stringValue = "Please enter a license key"
-            licenseResultLabel.textColor = .systemOrange
-            return
-        }
-        licenseResultLabel.stringValue = "Activating..."
-        licenseResultLabel.textColor = .secondaryLabelColor
-        activateButton.isEnabled = false
-        LicenseManager.shared.activate(key: key) { [weak self] success, message in
-            self?.licenseResultLabel.stringValue = message
-            self?.licenseResultLabel.textColor = success ? .systemGreen : .systemRed
-            self?.activateButton.isEnabled = true
-            self?.deactivateButton.isEnabled = Settings.shared.hasStoredLicenseCredentials
-            self?.updateLicenseStatusLabel()
-        }
-    }
-
-    @objc private func deactivateLicense() {
-        LicenseManager.shared.deactivate()
-        licenseKeyField.stringValue = ""
-        licenseResultLabel.stringValue = "License deactivated"
-        licenseResultLabel.textColor = .secondaryLabelColor
-        deactivateButton.isEnabled = false
-        updateLicenseStatusLabel()
-    }
-
-    @objc private func openCheckout() {
-        if let url = URL(string: LicenseManager.shared.checkoutURL) {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
     // MARK: - Helpers
 
     @discardableResult
@@ -3348,8 +2690,7 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
     }
 
     private func updateDownloadButton() {
-        let path = Settings.shared.whisperModelPath
-        let exists = FileManager.default.fileExists(atPath: path)
+        let exists = Settings.shared.speechModel.isInstalled
         downloadButton.isHidden = exists
         downloadStatusLabel.stringValue = exists ? "Model available" : "Model not downloaded"
         downloadStatusLabel.textColor = exists ? .systemGreen : .systemOrange
@@ -3385,7 +2726,7 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
     @objc private func resetToDefaults() {
         let alert = NSAlert()
         alert.messageText = "Reset to Defaults?"
-        alert.informativeText = "This will reset all settings to their defaults. Your license and saved transcripts will not be affected."
+        alert.informativeText = "This will reset all settings to their defaults. Your saved transcripts will not be affected."
         alert.addButton(withTitle: "Reset")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .warning
@@ -3420,67 +2761,24 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
 
     @objc private func aiEnabledChanged() {
         Settings.shared.aiEnabled = aiEnabledCheckbox.state == .on
+        if Settings.shared.aiEnabled {
+            ModelDownloadWindowController.shared.ensureModels([ModelCatalog.cleanup]) {}
+        }
     }
 
     @objc private func whisperModelChanged() {
-        if let title = whisperPopup.selectedItem?.title {
-            Settings.shared.whisperModel = title
+        if let id = whisperPopup.selectedItem?.representedObject as? String {
+            Settings.shared.speechModelID = id
         }
         updateDownloadButton()
     }
 
     @objc private func downloadModel() {
-        let modelName = Settings.shared.whisperModel
-        let modelDir = NSHomeDirectory() + "/Library/Application Support/Voice/Models"
-        let modelFile = "\(modelDir)/ggml-\(modelName).bin"
-        let urlString = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-\(modelName).bin"
-
         downloadButton.isEnabled = false
-        downloadStatusLabel.stringValue = "Downloading \(modelName)..."
-        downloadStatusLabel.textColor = .secondaryLabelColor
-
-        // Ensure directory exists
-        try? FileManager.default.createDirectory(atPath: modelDir, withIntermediateDirectories: true)
-
-        guard let url = URL(string: urlString) else {
-            downloadStatusLabel.stringValue = "Invalid URL"
-            downloadStatusLabel.textColor = .systemRed
-            downloadButton.isEnabled = true
-            return
+        ModelDownloadWindowController.shared.ensureModels([Settings.shared.speechModel]) { [weak self] in
+            self?.downloadButton.isEnabled = true
+            self?.updateDownloadButton()
         }
-
-        let task = URLSession.shared.downloadTask(with: url) { [weak self] tempURL, response, error in
-            DispatchQueue.main.async {
-                self?.downloadButton.isEnabled = true
-
-                if let error = error {
-                    self?.downloadStatusLabel.stringValue = "Error: \(error.localizedDescription)"
-                    self?.downloadStatusLabel.textColor = .systemRed
-                    return
-                }
-
-                guard let tempURL = tempURL else {
-                    self?.downloadStatusLabel.stringValue = "Download failed"
-                    self?.downloadStatusLabel.textColor = .systemRed
-                    return
-                }
-
-                do {
-                    // Remove existing file if present
-                    if FileManager.default.fileExists(atPath: modelFile) {
-                        try FileManager.default.removeItem(atPath: modelFile)
-                    }
-                    try FileManager.default.moveItem(at: tempURL, to: URL(fileURLWithPath: modelFile))
-                    self?.downloadStatusLabel.stringValue = "Download complete"
-                    self?.downloadStatusLabel.textColor = .systemGreen
-                    self?.updateDownloadButton()
-                } catch {
-                    self?.downloadStatusLabel.stringValue = "Error: \(error.localizedDescription)"
-                    self?.downloadStatusLabel.textColor = .systemRed
-                }
-            }
-        }
-        task.resume()
     }
 }
 
@@ -3573,32 +2871,7 @@ func normalizeWavFile(at path: String) -> Bool {
     }
 }
 
-// Run a Process and wait up to `timeout` seconds. If it doesn't exit in time,
-// terminate it. Returns true if it exited normally within the window.
-@discardableResult
-func runWithTimeout(_ process: Process, timeout: TimeInterval) -> Bool {
-    let sem = DispatchSemaphore(value: 0)
-    var terminatedBy = "normal"
-    process.terminationHandler = { _ in sem.signal() }
-    let result = sem.wait(timeout: .now() + timeout)
-    if result == .timedOut {
-        terminatedBy = "timeout"
-        if process.isRunning {
-            process.terminate()
-            // Give it a brief grace period to flush pipes after SIGTERM.
-            _ = sem.wait(timeout: .now() + 0.5)
-            if process.isRunning {
-                kill(process.processIdentifier, SIGKILL)
-                _ = sem.wait(timeout: .now() + 0.5)
-            }
-        }
-        NSLog("Voice: process killed after %.1fs timeout", timeout)
-    }
-    process.terminationHandler = nil
-    return terminatedBy == "normal"
-}
-
-// Build a short initial prompt for whisper-cli that biases the decoder toward
+// Build a short initial prompt for Whisper that biases the decoder toward
 // the active app's vocabulary — e.g. code terms in Xcode, casual tone in
 // Messages. Whisper uses this as prior context without transcribing it.
 func whisperContextPrompt(from context: AppContext) -> String {
@@ -3636,27 +2909,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     var audioFile: String?
     var previousApp: NSRunningApplication?  // saved before recording to refocus for paste
 
-    var whisperPath: String {
-        let bundled = Bundle.main.resourcePath! + "/whisper-cli"
-        if FileManager.default.fileExists(atPath: bundled) { return bundled }
-        // Search common install locations as last resort
-        for path in ["/opt/homebrew/bin/whisper-cli", "/usr/local/bin/whisper-cli"] {
-            if FileManager.default.fileExists(atPath: path) { return path }
-        }
-        // Return bundled path anyway — transcribeAndProcess will show proper error on launch failure
-        return bundled
-    }
     let afplayPath = "/usr/bin/afplay"
 
     let inputMonitor = InputMonitor()
     let textInjector = TextInjector()
-    let llamaClient = LlamaClient()
     let overlayWindow = OverlayWindow()
 
     var popoTimer: Timer?
 
     var dismissTimer: Timer?
     var lastTranscription: String?
+    var settingsMenuItem: NSMenuItem?
+
+    // Every quit path (menu, relaunch, logout) lands here. Models must be
+    // freed before exit or ggml's Metal teardown aborts the process.
+    func applicationWillTerminate(_ notification: Notification) {
+        SpeechEngine.shared.shutdown()
+    }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
         return false
@@ -3746,22 +3015,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         menu.addItem(NSMenuItem.separator())
 
-        // Trial/license status (per D-10) — show for non-licensed users
-        let licenseState = LicenseManager.shared.currentState
-        if case .licensed = licenseState {
-            // Clean menu for licensed users — no status shown
-        } else {
-            let licenseStatusItem = NSMenuItem(title: LicenseManager.shared.statusText, action: nil, keyEquivalent: "")
-            licenseStatusItem.isEnabled = false
-            menu.addItem(licenseStatusItem)
-            menu.addItem(NSMenuItem.separator())
-        }
-
         // Settings & Quit
-        let settingsItem = NSMenuItem(title: "Settings\u{2026}", action: #selector(openSettings), keyEquivalent: ",")
-        settingsItem.target = self
-        if #available(macOS 14.0, *) { settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil) }
-        menu.addItem(settingsItem)
+        settingsMenuItem = NSMenuItem(title: "Settings\u{2026}", action: #selector(openSettings), keyEquivalent: ",")
+        settingsMenuItem?.target = self
+        if #available(macOS 14.0, *), let settingsMenuItem {
+            settingsMenuItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
+        }
+        if let settingsMenuItem {
+            menu.addItem(settingsMenuItem)
+        }
         let updateItem = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
         updateItem.target = self
         menu.addItem(updateItem)
@@ -3776,12 +3038,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         // Setup input monitor
         inputMonitor.onRecordStart = { [weak self] in
-            guard LicenseManager.shared.canRecord else {
-                DispatchQueue.main.async {
-                    LicenseExpiryWindowController.shared.show()
-                }
-                return
-            }
             self?.startRecording()
         }
         inputMonitor.onRecordStop = { [weak self] in
@@ -3791,12 +3047,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             self?.cancelRecording()
         }
         inputMonitor.onPopoStart = { [weak self] in
-            guard LicenseManager.shared.canRecord else {
-                DispatchQueue.main.async {
-                    LicenseExpiryWindowController.shared.show()
-                }
-                return
-            }
             self?.startPopo()
         }
         inputMonitor.onPopoStop = { [weak self] in
@@ -3806,13 +3056,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // First-launch onboarding (per D-05)
         if !Settings.shared.onboardingComplete {
             OnboardingWindowController.shared.show()
-            // Skip license enforcement during onboarding — it can steal focus
-        } else {
-            // License enforcement (per D-07, D-11)
-            LicenseManager.shared.validateIfNeeded()
-            if !LicenseManager.shared.canRecord {
-                LicenseExpiryWindowController.shared.show()
-            }
         }
 
         inputMonitor.reloadHotkey()
@@ -3845,18 +3088,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             // Debounce — AVAudioEngine setup itself can trigger device change notifications
             if self.isRestartingEngine { return }
             NSLog("Voice: default input device changed")
-            // If currently recording, restart the engine with the new device
-            if case .recording = self.appState {
-                NSLog("Voice: restarting engine mid-recording due to device change")
+            // If currently capturing audio, restart the engine with the new device.
+            switch self.appState {
+            case .recording, .popo:
+                NSLog("Voice: restarting engine during active capture due to device change")
                 self.audioEngine?.inputNode.removeTap(onBus: 0)
                 self.audioEngine?.stop()
                 self.audioEngine = nil
                 // Small delay for the new device to settle
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    if case .recording = self.appState {
+                    switch self.appState {
+                    case .recording, .popo:
                         self.restartRecordingEngine()
+                    default:
+                        break
                     }
                 }
+            default:
+                break
             }
         }
 
@@ -3874,19 +3123,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             }
         }
 
-        // License validation for existing subscribers
-        LicenseManager.shared.validateIfNeeded()
-
-        // Preflight: ensure whisper model exists (auto-download if missing)
-        ModelDownloadWindowController.shared.ensureModel { [weak self] in
-            // AI model health check.
-            if Settings.shared.aiEnabled {
-                self?.llamaClient.healthCheck { [weak self] available in
-                    if available {
-                        self?.llamaClient.warmup()
-                    }
-                }
-            }
+        // Preflight: download any missing models (speech always, cleanup
+        // only if AI cleanup is on). Models aren't bundled in the DMG.
+        var required = [Settings.shared.speechModel]
+        if Settings.shared.aiEnabled { required.append(ModelCatalog.cleanup) }
+        ModelDownloadWindowController.shared.ensureModels(required) {
+            SpeechEngine.shared.warmUp(speech: Settings.shared.speechModel, cleanup: Settings.shared.aiEnabled)
         }
     }
 
@@ -4040,6 +3282,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         // Save the currently focused app so we can refocus it before pasting
         previousApp = NSWorkspace.shared.frontmostApplication
+        // Load models while the user talks, so they're warm at release.
+        SpeechEngine.shared.prepare(speech: Settings.shared.speechModel, cleanup: Settings.shared.aiEnabled)
 
         // Show feedback immediately — before engine start
         appState = .recording
@@ -4374,6 +3618,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         zeroSignalWarningShown = false
 
         previousApp = NSWorkspace.shared.frontmostApplication
+        // Load models while the user talks, so they're warm at release.
+        SpeechEngine.shared.prepare(speech: Settings.shared.speechModel, cleanup: Settings.shared.aiEnabled)
 
         // Show feedback immediately — before engine start
         appState = .popo
@@ -4634,104 +3880,59 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         let appContext = AppContext.current()
 
         // Peak-normalize the WAV so quiet/mumbled speech is brought up to a
-        // consistent level before whisper sees it. This is the single biggest
-        // quality win for low-volume input and costs ~10ms.
+        // consistent level before the speech model sees it. This is the single
+        // biggest quality win for low-volume input and costs ~10ms.
         normalizeWavFile(at: audioFile)
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: whisperPath)
-        var whisperArgs: [String] = [
-            "--model", Settings.shared.whisperModelPath,
-            "--file", audioFile,
-            "--no-timestamps",
-            "--threads", "8",
-            "--language", "en",
-            // Wider beam than default 5 — markedly better on ambiguous /
-            // whispered audio at ~2x decode cost (still sub-second on turbo).
-            "--beam-size", "8"
-        ]
-        let ctxPrompt = whisperContextPrompt(from: appContext)
-        if !ctxPrompt.isEmpty {
-            whisperArgs.append(contentsOf: ["--prompt", ctxPrompt])
-        }
-        process.arguments = whisperArgs
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-            // Whisper turbo on 30s clips is sub-second on Apple Silicon.
-            // 60s is a generous watchdog against a wedged binary.
-            let completed = runWithTimeout(process, timeout: 60)
-            if !completed {
-                finishProcessing(error: "Transcription timed out")
-                cleanup(audioFile)
-                return
-            }
-
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            var rawText = String(data: data, encoding: .utf8) ?? ""
-            rawText = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-            let lines = rawText.components(separatedBy: .newlines).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-            rawText = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-
-            // Fix common whisper punctuation issues: ensure space after . , ! ? : ;
-            rawText = rawText.replacingOccurrences(
-                of: "([.!?,;:])([A-Za-z])",
-                with: "$1 $2",
-                options: .regularExpression
-            )
-
-            if rawText.isEmpty {
-                finishProcessing(error: "Empty transcription")
-                cleanup(audioFile)
-                return
-            }
-
-            // Count words and check free tier limit
-            let wordCount = rawText.split(separator: " ").count
-            Settings.shared.addWords(wordCount)
-            if !LicenseManager.shared.canRecord {
-                let errorMessage: String
-                switch LicenseManager.shared.currentState {
-                case .limitReached:
-                    errorMessage = "Weekly limit reached"
-                case .invalid:
-                    errorMessage = "License invalid"
-                case .free, .licensed, .offlineGrace:
-                    errorMessage = "Recording unavailable"
-                }
-                DispatchQueue.main.async {
-                    LicenseExpiryWindowController.shared.show()
-                }
-                finishProcessing(error: errorMessage)
-                cleanup(audioFile)
-                return
-            }
-
-            // If AI cleanup is disabled, inject raw text directly
-            guard Settings.shared.aiEnabled else {
-                DispatchQueue.main.async { [weak self] in
-                    self?.refocusAndInject(rawText)
-                    self?.finishProcessing(text: rawText)
-                }
-                cleanup(audioFile)
-                return
-            }
-
-            llamaClient.cleanupText(rawText, appContext: appContext) { [weak self] cleanedText in
-                DispatchQueue.main.async {
-                    self?.refocusAndInject(cleanedText)
-                    self?.finishProcessing(text: cleanedText)
-                }
-            }
-        } catch {
-            finishProcessing(error: error.localizedDescription)
-        }
-
+        let samples = loadPCM16Wav(at: audioFile)
+        // Audio is in memory now — don't leave the recording on disk.
         cleanup(audioFile)
+        guard let samples, !samples.isEmpty else {
+            finishProcessing(error: "Recording too short")
+            return
+        }
+
+        let model = Settings.shared.speechModel
+        guard model.isInstalled else {
+            finishProcessing(error: "Speech model not downloaded")
+            DispatchQueue.main.async {
+                ModelDownloadWindowController.shared.ensureModels([model]) {}
+            }
+            return
+        }
+
+        // Only Whisper can use a biasing prompt; Parakeet has no prompt input.
+        let prompt = model.asrKind == VE_ASR_WHISPER ? whisperContextPrompt(from: appContext) : ""
+        guard var rawText = SpeechEngine.shared.transcribe(samples, model: model, prompt: prompt) else {
+            finishProcessing(error: "Transcription failed")
+            return
+        }
+        rawText = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lines = rawText.components(separatedBy: .newlines).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        rawText = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Fix glued sentences ("done.Next") and missing space after , ; :
+        // Narrow on purpose: "node.js", "Voice.swift" and "U.S." stay intact.
+        rawText = rawText.replacingOccurrences(
+            of: "([a-z]{2}[.!?])([A-Z][a-z])|([,;:])([A-Za-z])",
+            with: "$1$3 $2$4",
+            options: .regularExpression
+        )
+
+        if rawText.isEmpty {
+            finishProcessing(error: "Empty transcription")
+            return
+        }
+
+        let finalText = polishTranscript(rawText, appContext: appContext)
+        // "Um." alone cleans down to "." — nothing worth pasting.
+        guard finalText.rangeOfCharacter(from: .alphanumerics) != nil else {
+            finishProcessing(error: "Empty transcription")
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.refocusAndInject(finalText)
+            self?.finishProcessing(text: finalText)
+        }
     }
 
     func finishProcessing(text: String? = nil, error: String? = nil) {
@@ -4806,11 +4007,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     // NSMenuDelegate — rebuild mic submenu each time menu opens
     func menuNeedsUpdate(_ menu: NSMenu) {
-        // Update license status text in menu
-        if let item = menu.items.first(where: { $0.title.hasPrefix("Trial:") || $0.title == "Trial expired" || $0.title.hasPrefix("Licensed") || $0.title == "License invalid" }) {
-            item.title = LicenseManager.shared.statusText
-        }
-
         for item in menu.items {
             if item.title == "Microphone", let submenu = item.submenu {
                 submenu.removeAllItems()
@@ -4917,15 +4113,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
 // MARK: - Main
 
-// Disable macOS window restoration BEFORE app.run() — restoration happens during run(),
-// before applicationDidFinishLaunching, so this must be set early.
-UserDefaults.standard.set(false, forKey: "NSQuitAlwaysKeepsWindows")
-// Nuke any saved state left over from a previous run
-let savedStatePath = NSHomeDirectory() + "/Library/Saved Application State/com.faradaysoft.voice.savedState"
-try? FileManager.default.removeItem(atPath: savedStatePath)
+// @main (built with -parse-as-library) because the app is now more than one
+// Swift file, and top-level code is only allowed in main.swift.
+@main
+enum VoiceMain {
+    // NSApplication.delegate is weak — something has to own the delegate.
+    private static var appDelegate: AppDelegate?
 
-let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
-let delegate = AppDelegate()
-app.delegate = delegate
-app.run()
+    static func main() {
+        if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "--selftest" {
+            exit(SelfTest.run(Array(CommandLine.arguments.dropFirst(2))))
+        }
+
+        // Disable macOS window restoration BEFORE app.run() — restoration happens during run(),
+        // before applicationDidFinishLaunching, so this must be set early.
+        UserDefaults.standard.set(false, forKey: "NSQuitAlwaysKeepsWindows")
+        // Nuke any saved state left over from a previous run
+        let savedStatePath = NSHomeDirectory() + "/Library/Saved Application State/com.faradaysoft.voice.savedState"
+        try? FileManager.default.removeItem(atPath: savedStatePath)
+
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        let delegate = AppDelegate()
+        appDelegate = delegate
+        app.delegate = delegate
+        app.run()
+    }
+}

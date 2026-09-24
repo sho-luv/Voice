@@ -1,16 +1,66 @@
-# AI Cleanup Model Evaluation
+# Model Evaluation
 
-Voice uses a bundled local LLM (via `llama-completion` from llama.cpp) to clean up raw whisper transcripts — remove filler words, fix grammar, preserve meaning. This document records every model evaluated, what worked, and what failed, so we don't repeat experiments.
+Voice runs two local models in-process (see `engine/`): a speech recognizer, and an LLM that cleans up the transcript — removing filler words, fixing grammar, preserving meaning. This document records every model evaluated, what worked, and what failed, so we don't repeat experiments.
+
+# Speech recognition
+
+## Current choice (3.3)
+
+**Parakeet TDT 0.6B v3 Q4_0** (`ggml-parakeet-tdt-0.6b-v3-q4_0.bin`, 356 MB) by default; **Whisper large-v3-turbo Q5_0** (574 MB) is selectable.
+
+Benchmarked 2026-09-24 on an M4 Max over the 73 utterances (481 s) of `hf-internal-testing/librispeech_asr_dummy` (clean read speech), normalized WER, one model load per run:
+
+| Model | Size | WER | Time for 481 s of audio |
+|---|---|---|---|
+| Whisper large-v3-turbo Q5_0, beam 8 (3.2.x setting) | 574 MB | 3.65% | 41.4 s |
+| Whisper large-v3-turbo Q5_0, greedy | 574 MB | 3.74% | 26.9 s |
+| Parakeet TDT 0.6B v3 Q4_K | 416 MB | 3.74% | 4.7 s |
+| **Parakeet TDT 0.6B v3 Q4_0** | **356 MB** | **3.65%** | **4.3 s** |
+
+Through the app pipeline (`Voice --selftest`), Parakeet averages **45 ms per utterance** warm.
+
+On dictation-style clips (TTS voices, tech jargon) the two trade single errors: Whisper heard "returns a 404" as "returns a 400 for"; Parakeet heard "created at" as "create edit". Parakeet lowercases some proper nouns ("redis").
+
+**Why Whisper is kept:** it is the only model that accepts a decoder prompt, which Voice fills with the active app/window context and the user's custom vocabulary. Parakeet has no prompt input. Vocabulary spelling is also restored after transcription for both models (`TextCleanup.applyVocabulary`), which covers casing ("kubernetes" → "Kubernetes") but not mis-hearings. Pre-3.3 users who had custom vocabulary are migrated to Whisper; everyone else to Parakeet.
+
+**Not tried yet:** Parakeet TDT 0.6B **v2** (English-only, reportedly slightly better English WER than v3) — no official ggml conversion when this was written. `JoaoZaokk/parakeet-tdt-0.6b-v2-ggml` exists but is unofficial.
+
+## Engine: why in-process
+
+Until 3.2.6 each dictation spawned `whisper-cli` then `llama-completion`. Measured on the same machine:
+
+| Stage | Subprocess wall time | Of which inference | In-process, warm |
+|---|---|---|---|
+| Whisper turbo | 1.10 s | 0.37 s | 0.34 s |
+| Parakeet | — | — | 0.06 s |
+| Qwen cleanup | 1.08 s (8.7 s cold page cache) | 0.13 s | 0.13 s |
+
+Homebrew's whisper-cpp vendors ggml 0.9.x while llama.cpp links Homebrew's ggml at a different version, so both can't share a process as-is. `engine/build.sh` builds whisper.cpp and llama.cpp from pinned tags against one ggml (llama.cpp's), statically, with Metal shaders embedded and BLAS/OpenMP off.
+
+**Metal shader compile:** the first inference of each new app binary compiles ggml's embedded Metal shader source (~16 s on an M4 Max, likely longer on M1). macOS caches the result per binary: later launches of the same build take ~0.2 s, but every install or update pays it once. `SpeechEngine.warmUp` runs it in the background at launch, so it only affects a dictation started in the first ~16 s after an update. The proper fix is to precompile a `.metallib` at build time (`GGML_METAL_EMBED_LIBRARY=OFF` plus `xcrun metal`), which needs Xcode's separate Metal Toolchain download on every build machine and in CI.
+
+# AI cleanup
 
 ## Current choice
 
-**Qwen2.5-1.5B-Instruct Q4_0** (`qwen2.5-1.5b-instruct-q4_0.gguf`, ~940 MB).
+**Qwen2.5-1.5B-Instruct Q4_0** (`qwen2.5-1.5b-instruct-q4_0.gguf`, 1.07 GB).
 
 Chosen because it's the only sub-1GB model evaluated that both:
 - Faithfully preserves the speaker's wording (doesn't paraphrase aggressively)
 - Treats input as text-to-rewrite, not a message-to-reply-to
 
-Bundle cost: DMG ~1.5 GB. Accept this; fidelity is the product goal.
+Since 3.3 the model is downloaded on first launch (only if AI cleanup is on), not bundled, so it no longer affects DMG size.
+
+## Guardrails (3.3)
+
+Prompting alone never reliably stopped the "responds as a chatbot" failure (see Gemma/Llama below), so cleanup is now structured so that failure can't reach the user:
+
+1. **Deterministic first.** Hesitations (um, uh, erm, hmm) are removed with a regex (`TextCleanup.removeHesitations`). It's safe because those tokens never carry meaning. Words like "like", "you know" and "I mean" can carry meaning, so they are left for the model.
+2. **LLM only when needed.** `TextCleanup.needsModel` sends text to the LLM only if it contains ambiguous fillers, correction cues ("no wait", "scratch that", "I mean"), a repeated word, or lacks punctuation. Clean dictation never reaches the model, so it can't be paraphrased.
+3. **Output check.** `TextCleanup.acceptModelOutput` rejects output whose word count is outside 0.4–1.25× the input, or that adds more than max(2, 15%) words not present in the input. A rejected output falls back to the deterministic text. In unit tests it rejects "I don't have the report to send you.", "Sure! Here is the report…", and a poem, and accepts real rewrites, including corrections and "lets" → "Let's".
+4. **Bounded generation.** Greedy decoding, `max_tokens = min(1024, 2 × input tokens + 32)`.
+
+With these in place, the MODELS.md battery plus "what do you think we should do about the outage" and "can you write me a poem about cats" all come back as faithful rewrites (`Voice --selftest`).
 
 ## Task profile
 
@@ -19,7 +69,7 @@ The job is narrow and specific:
 - Output: same content, filler words removed, grammar fixed, capitalization added
 - Must NOT paraphrase, summarize, reword, or respond as if chatting
 - Must NOT add lists, bullets, headers, markdown, commentary, preamble
-- Runs at temp 0.1, `-ngl 99` (full GPU offload on Apple Silicon)
+- Runs greedy (was temp 0.1 via llama-completion), fully offloaded to Metal
 
 This is NOT a reasoning task, NOT a coding task, NOT a general chat task. Most instruction-tuned small models are optimized for helpfulness and chat, which actively hurts this task.
 
@@ -121,14 +171,14 @@ Minimum test battery, before any DMG is built or shipped:
 6. **Short acknowledgment** — "yeah I'm good with that plan lets ship it"
 7. **Rambling description** — longer run-on with embedded "you know" that might be filler or might be genuine
 
-A candidate must pass ALL of these in pipeline testing (via Voice.swift's LlamaClient, not just isolated llama-completion calls). If it fails test 3 — do not ship. Test 3 is the single reliable predictor of real-world behavior.
+A candidate must pass ALL of these in pipeline testing (`Voice --selftest`, which runs the real engine, prompt and guardrail — not isolated llama.cpp CLI calls). If it fails test 3 — do not ship. Test 3 is the single reliable predictor of real-world behavior.
 
 ## Future watchlist
 
 - **Qwen3-4B / Qwen3-8B Q3/Q4** if sizing cooperates — but the thinking-mode default is a concern.
 - **Phi-4-Mini** if a ~1B distilled variant appears.
 - **Llama-4 small instruct** if/when released with less chat bias.
-- **Apple Foundation Models** as an optional backend when macOS 26+ adoption is widespread — zero bundle cost, better than any bundled model on modern Macs.
+- **Apple Foundation Models** as an optional backend when macOS 26+ adoption is widespread — zero download cost. Tried 2026-09-24, but the dev Mac had Apple Intelligence disabled (`appleIntelligenceNotEnabled`), so it's still untested. That's also a reason it can't be the only backend: it's opt-in per user and often disabled on managed Macs. Run the battery on a Mac with Apple Intelligence on before adding it.
 - **Task-specific fine-tunes** — someone may eventually release a ~1B model specifically tuned for "faithful text rewriting." Watch Hugging Face trending.
 
 ## Decision log
@@ -140,3 +190,4 @@ A candidate must pass ALL of these in pipeline testing (via Voice.swift's LlamaC
 | 2026-04-20 | 3.2.3 | Qwen 0.5B Q4_0 bundled | Broken — filename mismatch, cleanup silently skipped |
 | 2026-04-20 | 3.2.4 | Gemma-3-1B Q4_K_M bundled | Broken in production — chat-mode drift |
 | 2026-04-20 | (local) | Qwen 1.5B Q4_0 restored | ✅ Current working state |
+| 2026-09-24 | 3.3 | Qwen 1.5B Q4_0, in-process + guardrails; ASR → Parakeet v3 | ✅ ~0.2 s warm pipeline; 7 MB app; models downloaded on first launch |

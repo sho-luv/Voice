@@ -64,7 +64,7 @@ jobs:
           fi
 
       - name: Install release dependencies
-        run: brew install whisper-cpp create-dmg
+        run: brew install cmake create-dmg
 
       - name: Import signing certificate
         id: keychain

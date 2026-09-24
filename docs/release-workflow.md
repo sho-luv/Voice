@@ -2,7 +2,7 @@
 
 This is the short checklist version of the release process.
 
-For the full explanation of what the system does, why it exists, and how GitHub Actions handles releases, see [RELEASING.md](/Users/sho_luv/home/projects/mine/voice/RELEASING.md).
+For the full explanation of what the system does, why it exists, and how GitHub Actions handles releases, see [RELEASING.md](../RELEASING.md).
 
 ## Pre-Release
 
@@ -13,8 +13,8 @@ For the full explanation of what the system does, why it exists, and how GitHub 
 
 ## Versioning
 
-- [ ] update `CFBundleShortVersionString` in [Info.plist](/Users/sho_luv/home/projects/mine/voice/Info.plist)
-- [ ] update `CFBundleVersion` in [Info.plist](/Users/sho_luv/home/projects/mine/voice/Info.plist)
+- [ ] update `CFBundleShortVersionString` in [Info.plist](../Info.plist)
+- [ ] update `CFBundleVersion` in [Info.plist](../Info.plist)
 - [ ] confirm the Git tag will match the version exactly, with a leading `v`
 
 Example:

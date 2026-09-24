@@ -1,3 +1,7 @@
+// Voice — local speech-to-text for macOS
+// Copyright (C) 2026 Enfrosec LLC (dba Faraday Soft)
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // VoiceExceptionCatcher.h
 // Tiny ObjC shim so Swift can catch Obj-C NSExceptions (e.g. from
 // AVAudioNode.installTap, CoreAudio device-disconnect races). Swift's

@@ -16,6 +16,8 @@ jobs:
       - name: Lint shell scripts
         run: |
           bash -n install.sh
+          bash -n build-app.sh
+          bash -n engine/build.sh
           bash -n create-dmg.sh
           bash -n voice.sh
 
@@ -26,8 +28,10 @@ jobs:
         run: |
           mkdir -p /tmp/voice-module-cache
           swiftc -module-cache-path /tmp/voice-module-cache \
-            -typecheck Voice.swift \
+            -parse-as-library \
+            -typecheck Voice.swift SpeechEngine.swift \
             -import-objc-header Voice-Bridging-Header.h \
+            -I engine \
             -framework Cocoa \
             -framework ApplicationServices \
             -framework UserNotifications \

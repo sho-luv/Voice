@@ -8,7 +8,7 @@
 
 Voice is a menu bar and Dock app that replaces cloud-based dictation with fast, private, local transcription. It works everywhere -- terminals, browsers, editors, chat apps -- while keeping your audio and transcriptions on your Mac.
 
-Built with [whisper.cpp](https://github.com/ggerganov/whisper.cpp) for transcription and optionally [Ollama](https://ollama.ai) for local AI text cleanup. Voice does not send audio or transcripts to remote AI services. License activation and validation still use LemonSqueezy. Inspired by [Wispr Flow](https://wispr.com).
+Built on [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (Parakeet and Whisper speech models) and [llama.cpp](https://github.com/ggml-org/llama.cpp) (local AI cleanup), both compiled into the app. Voice is free and open source, with no accounts, usage limits, or telemetry. Audio and transcripts never leave your Mac. The only network requests are the one-time model downloads from Hugging Face and the "Check for Updates" menu item. Inspired by [Wispr Flow](https://wispr.com).
 
 ---
 
@@ -77,14 +77,14 @@ Open from the menu bar (click the waveform icon > "Settings...") or press **Cmd+
 | Setting | Description | Default |
 |---------|-------------|---------|
 | Local AI text cleanup | Enable/disable AI post-processing of transcriptions | On |
-| Model | Ollama model name for text cleanup | llama3.2:3b |
-| Test Connection | Verify the local Ollama service is reachable | -- |
+| Custom instructions | Optional rewrite guardrails appended to the cleanup prompt | Blank |
+| Custom vocabulary | Names, acronyms, and technical terms. Their spelling is restored in every transcript; the Whisper model also uses them to bias recognition | Blank |
 
 ### Transcription
 
 | Setting | Description | Default |
 |---------|-------------|---------|
-| Whisper model | large-v3-turbo-q5_0, small.en, or large-v3 | large-v3-turbo-q5_0 |
+| Model | Parakeet v3 (fastest) or Whisper large-v3-turbo (supports vocabulary biasing) | Parakeet v3 |
 | Download Model | Download the selected model if not already on disk | -- |
 | Save transcripts | Save each transcription to a local text file | On |
 | Transcript directory | Folder used for saved transcript files | `~/Documents/Voice Transcripts` |
@@ -109,57 +109,55 @@ Voice can clean up raw transcription before inserting it:
 - Handles corrections ("scratch that", "no wait" -- keeps only the final version)
 - Adapts tone to context (professional in Mail, casual in Messages, technical in Terminal)
 
-AI cleanup uses [Ollama](https://ollama.ai) running locally on your machine. Install it and pull a model:
+Hesitations ("um", "uh") are always removed deterministically. The local LLM (`Qwen2.5-1.5B-Instruct Q4_0`, run in-process by llama.cpp) only runs when a transcript needs judgment — ambiguous fillers, self-corrections, repeated words — and its output is discarded if it stops being a faithful rewrite (e.g. the model answers the text instead of cleaning it). Clean dictation is pasted without touching the model.
 
-```bash
-brew install ollama
-brew services start ollama
-ollama pull llama3.2:3b
-```
+## How It Works
 
-Test the connection in the AI tab of Settings. If local AI cleanup is disabled (or Ollama is unreachable), raw whisper output is used.
+Speech recognition and cleanup run **in-process**: whisper.cpp (Whisper + NVIDIA Parakeet) and llama.cpp are compiled from pinned sources into one static library (`engine/`) sharing a single ggml with Metal acceleration. Models load when you start talking, stay warm while you use Voice, and are released after 10 idle minutes.
+
+Models are downloaded on first launch into `~/Library/Application Support/Voice/Models/` and verified against pinned SHA-256 hashes before use:
+
+| Model | Purpose | Size |
+|-------|---------|------|
+| Parakeet TDT 0.6B v3 Q4_0 | Speech recognition (default) | 356 MB |
+| Whisper large-v3-turbo Q5_0 | Speech recognition (optional) | 574 MB |
+| Qwen2.5-1.5B-Instruct Q4_0 | AI cleanup (if enabled) | 1.07 GB |
+
+See [MODELS.md](MODELS.md) for benchmarks and the model selection history.
 
 ## Requirements
 
-- macOS on Apple Silicon or Intel
-- [Homebrew](https://brew.sh)
-- Xcode Command Line Tools (`xcode-select --install`)
+- macOS 13+ on Apple Silicon
+- To build: Xcode Command Line Tools (`xcode-select --install`), [Homebrew](https://brew.sh), and `cmake`
 
-The installer will handle `whisper-cpp`, `sox`, and the whisper model automatically.
+The installer installs `cmake` if needed, builds the engine, and installs the app. The app downloads its models on first launch.
 
 ## Release Docs
 
-For release process documentation, see [RELEASING.md](/Users/sho_luv/home/projects/mine/voice/RELEASING.md). That covers the GitHub Actions release pipeline, signing and notarization setup, versioning rules, and the exact steps for shipping a tagged release.
+For release process documentation, see [RELEASING.md](RELEASING.md). That covers the GitHub Actions release pipeline, signing and notarization setup, versioning rules, and the exact steps for shipping a tagged release.
 
 ## Manual Build
 
 If you prefer to build without the installer:
 
 ```bash
-# Install dependencies
-brew install whisper-cpp sox
+brew install cmake
 
-# Download the model (574 MB)
-mkdir -p ~/Library/Application\ Support/Voice/Models
-curl -L -o ~/Library/Application\ Support/Voice/Models/ggml-large-v3-turbo-q5_0.bin \
-    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin
-
-# Compile
-swiftc -O -o Voice Voice.swift \
-    -framework Cocoa -framework ApplicationServices -framework UserNotifications
-
-# Create app bundle
-mkdir -p Voice.app/Contents/MacOS
-mkdir -p Voice.app/Contents/Resources
-cp Voice Voice.app/Contents/MacOS/Voice
-cp Info.plist Voice.app/Contents/Info.plist
-cp Voice.icns Voice.app/Contents/Resources/Voice.icns
+# Build the static speech engine (first run clones pinned whisper.cpp/llama.cpp, ~1 min),
+# compile the app, and assemble Voice.app
+./build-app.sh
 
 # Sign (see Code Signing section below)
-codesign --force --sign - Voice.app
+codesign --force --sign - --options runtime --entitlements Voice.entitlements Voice.app
 
 # Run
 open Voice.app
+```
+
+To check the engine without the UI, run the headless self-test. It loads the installed models, transcribes the given WAV files (16 kHz mono PCM), and runs the AI cleanup test battery:
+
+```bash
+./Voice.app/Contents/MacOS/Voice --selftest recording.wav
 ```
 
 ## Code Signing & Accessibility Permissions
@@ -220,9 +218,9 @@ The app must **not be running** when you grant the permission.
 - For other apps: the Accessibility API is used. Make sure the app has an active text field focused
 
 **AI cleanup not working**
-- Ollama: confirm it's running (`curl http://localhost:11434/api/tags`) and the model is pulled (`ollama list`)
-- Click "Test Connection" in Settings to verify
-- Voice falls back to raw transcription silently if Ollama is unreachable
+- Confirm `~/Library/Application Support/Voice/Models/qwen2.5-1.5b-instruct-q4_0.gguf` exists; toggling AI cleanup off and on in Settings re-downloads it
+- Clean dictation intentionally skips the model — only transcripts with fillers or corrections are sent to it
+- Run `Voice --selftest` (see Manual Build) to see the model's output and whether the guardrail accepted it
 
 **Settings window appears on relaunch**
 - This was a macOS window restoration issue, now fixed. If it persists: `rm -rf ~/Library/Saved\ Application\ State/com.faradaysoft.voice.savedState` and relaunch
@@ -240,4 +238,8 @@ defaults delete com.faradaysoft.voice
 
 ## License
 
-MIT
+Voice is free software: you can redistribute it and/or modify it under the terms of the [GNU General Public License](LICENSE) as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+Copyright © 2026 Enfrosec LLC (dba Faraday Soft).
+
+Third-party components and model licenses are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

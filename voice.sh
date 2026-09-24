@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
 #
 # voice - Record speech, transcribe locally with whisper.cpp, copy to clipboard.
 #

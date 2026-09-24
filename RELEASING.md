@@ -2,7 +2,7 @@
 
 This document explains the release system for `Voice`: what it does, why it exists, and how to use it.
 
-If you want the short operator checklist, see [docs/release-workflow.md](/Users/sho_luv/home/projects/mine/voice/docs/release-workflow.md).
+If you want the short operator checklist, see [docs/release-workflow.md](docs/release-workflow.md).
 
 ## Overview
 
@@ -17,17 +17,17 @@ That means:
 
 The release system is built around a few core files:
 
-- [Info.plist](/Users/sho_luv/home/projects/mine/voice/Info.plist)
+- [Info.plist](Info.plist)
   This is the source of truth for the app version.
-- [create-dmg.sh](/Users/sho_luv/home/projects/mine/voice/create-dmg.sh)
+- [create-dmg.sh](create-dmg.sh)
   This builds, signs, notarizes, and packages the app.
-- [install.sh](/Users/sho_luv/home/projects/mine/voice/install.sh)
+- [install.sh](install.sh)
   This is the local installer path for development and manual installs.
-- [ci.yml](/Users/sho_luv/home/projects/mine/voice/.github/workflows/ci.yml)
+- [ci.yml](.github/workflows/ci.yml)
   This validates the repo on pushes and pull requests.
-- [release.yml](/Users/sho_luv/home/projects/mine/voice/.github/workflows/release.yml)
+- [release.yml](.github/workflows/release.yml)
   This runs the release pipeline from Git tags.
-- [.github/release.yml](/Users/sho_luv/home/projects/mine/voice/.github/release.yml)
+- [.github/release.yml](.github/release.yml)
   This controls release note categorization.
 
 ## Why This Exists
@@ -54,7 +54,7 @@ In practice, this gives you:
 
 ### 1. Version source of truth
 
-The app version lives in [Info.plist](/Users/sho_luv/home/projects/mine/voice/Info.plist).
+The app version lives in [Info.plist](Info.plist).
 
 Two fields matter:
 
@@ -70,7 +70,7 @@ That means you do not manually edit a version string in multiple places anymore.
 
 ### 2. Continuous integration
 
-[ci.yml](/Users/sho_luv/home/projects/mine/voice/.github/workflows/ci.yml) runs on:
+[ci.yml](.github/workflows/ci.yml) runs on:
 
 - pushes to `main`
 - pull requests
@@ -85,7 +85,7 @@ This workflow is there to catch obvious breakage before you cut a release.
 
 ### 3. Release workflow
 
-[release.yml](/Users/sho_luv/home/projects/mine/voice/.github/workflows/release.yml) runs on:
+[release.yml](.github/workflows/release.yml) runs on:
 
 - pushes to tags matching `v*`
 - manual `workflow_dispatch`
@@ -99,7 +99,7 @@ For a real tagged release, it does the following:
 5. installs build dependencies on the macOS runner
 6. imports the signing certificate into a temporary keychain
 7. configures Apple notarization credentials
-8. runs [create-dmg.sh](/Users/sho_luv/home/projects/mine/voice/create-dmg.sh)
+8. runs [create-dmg.sh](create-dmg.sh)
 9. uploads the generated DMG as a workflow artifact
 10. publishes a GitHub Release and attaches the DMG
 
@@ -118,7 +118,7 @@ Only a tag push publishes a GitHub Release.
 
 ### 5. Release note generation
 
-GitHub release notes are automatically generated and grouped using [.github/release.yml](/Users/sho_luv/home/projects/mine/voice/.github/release.yml).
+GitHub release notes are automatically generated and grouped using [.github/release.yml](.github/release.yml).
 
 If you use labels such as:
 
@@ -198,7 +198,7 @@ Before cutting a release:
 
 ### Step 2. Update the version
 
-Edit [Info.plist](/Users/sho_luv/home/projects/mine/voice/Info.plist):
+Edit [Info.plist](Info.plist):
 
 - set `CFBundleShortVersionString`
 - set `CFBundleVersion`
@@ -395,7 +395,7 @@ Normal development uses:
 - branch work
 - pull requests
 - CI validation
-- local installs with [install.sh](/Users/sho_luv/home/projects/mine/voice/install.sh)
+- local installs with [install.sh](install.sh)
 
 Releases use:
 
