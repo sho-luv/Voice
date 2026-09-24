@@ -48,7 +48,6 @@ class Settings {
             "popoTimeout": 5,
             "clipboardRestore": true,
             "aiEnabled": true,
-            "aiModelOllama": "llama3.2:3b",
             "micDeviceUID": "",
             "overlayShowAppName": true,
             "overlayShowAppIcon": true,
@@ -105,11 +104,6 @@ class Settings {
     var aiEnabled: Bool {
         get { defaults.bool(forKey: "aiEnabled") }
         set { defaults.set(newValue, forKey: "aiEnabled") }
-    }
-
-    var aiModel: String {
-        get { defaults.string(forKey: "aiModelOllama") ?? "llama3.2:3b" }
-        set { defaults.set(newValue, forKey: "aiModelOllama") }
     }
 
     var aiCustomPrompt: String {
@@ -176,7 +170,7 @@ class Settings {
     var overlayFontSize: CGFloat {
         get {
             let val = defaults.double(forKey: "overlayFontSize")
-            return val > 0 ? CGFloat(val) : 11.0
+            return val > 0 ? CGFloat(val) : 13.0  // Medium
         }
         set { defaults.set(Double(newValue), forKey: "overlayFontSize") }
     }
@@ -250,8 +244,8 @@ class Settings {
         // Reset user-facing settings to defaults (preserves saved transcripts)
         let keysToReset = [
             "hotkeyIndex", "soundsEnabled", "autoStartOnLogin", "popoTimeout",
-            "clipboardRestore", "aiEnabled", "aiModelOllama", "whisperModel", "speechModel",
-            "aiCustomPrompt", "micDeviceUID", "overlayShowAppName", "overlayShowAppIcon",
+            "clipboardRestore", "aiEnabled", "speechModel",
+            "aiCustomPrompt", "customVocabulary", "micDeviceUID", "overlayShowAppName", "overlayShowAppIcon",
             "overlayShowWindowTitle", "overlayShowTimer",
             "overlayEnabled", "overlayBackgroundOpacity", "overlayFontSize",
             "overlaySensitivity", "saveTranscripts", "transcriptDirectory"
@@ -259,21 +253,13 @@ class Settings {
         for key in keysToReset {
             defaults.removeObject(forKey: key)
         }
-        defaults.removeObject(forKey: "aiProvider")
-        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix("apiKey") {
-            defaults.removeObject(forKey: key)
-        }
-        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix("aiModel") && key != "aiModelOllama" {
-            defaults.removeObject(forKey: key)
-        }
     }
 
+    // Pre-3.2 builds supported cloud AI providers (with API keys in
+    // UserDefaults) and Ollama. Remove anything they left behind.
     private func migrateLegacyAISettings() {
         defaults.removeObject(forKey: "aiProvider")
-        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix("apiKey") {
-            defaults.removeObject(forKey: key)
-        }
-        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix("aiModel") && key != "aiModelOllama" {
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix("apiKey") || key.hasPrefix("aiModel") {
             defaults.removeObject(forKey: key)
         }
     }
@@ -414,18 +400,6 @@ struct AppContext {
     let windowTitle: String
     let fieldRole: String
 
-    var toneGuidance: String {
-        let name = appName.lowercased()
-        if name.contains("mail") || name.contains("outlook") {
-            return "Maintain professional tone."
-        } else if name.contains("messages") || name.contains("slack") || name.contains("discord") {
-            return "Casual tone. Keep concise."
-        } else if name.contains("xcode") || name.contains("terminal") || name.contains("code") || name.contains("iterm") {
-            return "Preserve technical terms exactly."
-        }
-        return "Use natural, clear prose."
-    }
-
     static func current() -> AppContext {
         let systemWide = AXUIElementCreateSystemWide()
         var focusedApp: AnyObject?
@@ -540,7 +514,6 @@ class InputMonitor {
     private var fnDownTime: TimeInterval = 0
     private var isRecording = false
     private var isPopo = false
-    private var spaceHeld = false
     private let minHoldDuration: TimeInterval = 0.3  // ignore taps < 300ms
 
     // Double-tap detection for POPO mode
@@ -726,8 +699,36 @@ class InputMonitor {
 
 // Mini preview of the overlay pill shown in Settings
 class OverlayPreviewView: NSView {
-    var fontSize: CGFloat = 11.0
+    var fontSize: CGFloat = 13.0  // Medium (matches the default overlayFontSize)
     private let containerWidth: CGFloat = 430  // parent container width for centering
+
+    // Animated waveform so the "Waveform" slider shows a live effect in Settings.
+    // Bars use the SAME formula as the real overlay — min(1, rawLevel * sensitivity)
+    // — over a synthetic quiet-speech envelope, so low values barely move and
+    // high values clip at full height, exactly as they would while dictating.
+    private var wavePhase: CGFloat = 0
+    private var waveTimer: Timer?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil { startWave() } else { stopWave() }
+    }
+
+    private func startWave() {
+        guard waveTimer == nil else { return }
+        waveTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            self.wavePhase += 0.35
+            self.needsDisplay = true
+        }
+    }
+
+    private func stopWave() {
+        waveTimer?.invalidate()
+        waveTimer = nil
+    }
+
+    deinit { stopWave() }
 
     // Calculate ideal width for current settings
     func idealWidth() -> CGFloat {
@@ -805,11 +806,15 @@ class OverlayPreviewView: NSView {
             x += min(nameSize.width, 60) + 8
         }
 
-        let sampleLevels: [CGFloat] = [0.2, 0.4, 0.6, 0.9, 0.6, 0.4, 0.2]
+        let sensitivity = Settings.shared.overlaySensitivity
         let maxBarHeight: CGFloat = bounds.height * 0.6
         let minBarHeight: CGFloat = 4.0
         for i in 0..<barCount {
-            let barHeight = max(minBarHeight, sampleLevels[i] * maxBarHeight)
+            // Synthetic quiet-speech RMS (~0.012–0.030), then the real overlay's
+            // amplification. A travelling sine makes the bars bounce.
+            let rawLevel = 0.012 + 0.018 * (0.5 + 0.5 * sin(Double(wavePhase) + Double(i) * 0.9))
+            let amplified = min(CGFloat(1.0), CGFloat(rawLevel) * CGFloat(sensitivity))
+            let barHeight = max(minBarHeight, amplified * maxBarHeight)
             let bx = x + CGFloat(i) * (barWidth + barGap)
             let by = bounds.midY - barHeight / 2
             NSColor.white.withAlphaComponent(0.9).setFill()
@@ -911,7 +916,7 @@ class OverlayContentView: NSView {
     var recordingStartTime: Date?
     private var elapsedTimer: Timer?
 
-    // App context (shown in overlay per D-14, D-15)
+    // App context shown in the overlay
     var targetAppName: String = ""
     var targetAppIcon: NSImage?
 
@@ -1053,7 +1058,7 @@ class OverlayContentView: NSView {
         NSBezierPath(ovalIn: dotRect).fill()
         x += dotSize + 6
 
-        // App icon (per D-14, D-15)
+        // App icon
         if Settings.shared.overlayShowAppIcon, let icon = targetAppIcon {
             let iconSize: CGFloat = 16
             let iconRect = NSRect(x: x, y: bounds.midY - iconSize / 2, width: iconSize, height: iconSize)
@@ -1061,7 +1066,7 @@ class OverlayContentView: NSView {
             x += iconSize + 4
         }
 
-        // App name (per D-14)
+        // App name
         if Settings.shared.overlayShowAppName, !targetAppName.isEmpty {
             let nameStr = targetAppName as NSString
             let nameSize = nameStr.size(withAttributes: smallAttrs)
@@ -1097,7 +1102,7 @@ class OverlayContentView: NSView {
         }
         x = waveformX + waveformWidth + 8
 
-        // Elapsed timer (per D-13)
+        // Elapsed timer
         if Settings.shared.overlayShowTimer, let startTime = recordingStartTime {
             let elapsed = Int(Date().timeIntervalSince(startTime))
             let timerStr = String(format: "%d:%02d", elapsed / 60, elapsed % 60) as NSString
@@ -1507,24 +1512,95 @@ class ModelDownloadWindowController: NSObject, URLSessionDownloadDelegate {
     }
 }
 
+// A single checklist row: status dot, title, subtitle, and an action button
+// that hides once the item is satisfied. `refresh()` re-reads live state.
+private final class SetupRow: NSView {
+    private let iconView = NSImageView()
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let subtitleLabel = NSTextField(labelWithString: "")
+    private let actionButton = NSButton()
+    private let pendingSubtitle: String
+    private let doneSubtitle: String
+    let isDone: () -> Bool
+    private let action: () -> Void
+
+    init(title: String, subtitle: String, doneSubtitle: String, buttonTitle: String,
+         isDone: @escaping () -> Bool, action: @escaping () -> Void) {
+        self.pendingSubtitle = subtitle
+        self.doneSubtitle = doneSubtitle
+        self.isDone = isDone
+        self.action = action
+        super.init(frame: NSRect(x: 0, y: 0, width: 420, height: 52))
+
+        iconView.frame = NSRect(x: 4, y: 15, width: 24, height: 24)
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        addSubview(iconView)
+
+        titleLabel.stringValue = title
+        titleLabel.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
+        titleLabel.frame = NSRect(x: 40, y: 27, width: 250, height: 20)
+        addSubview(titleLabel)
+
+        subtitleLabel.font = NSFont.systemFont(ofSize: 12)
+        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.frame = NSRect(x: 40, y: 7, width: 270, height: 18)
+        addSubview(subtitleLabel)
+
+        actionButton.title = buttonTitle
+        actionButton.bezelStyle = .rounded
+        actionButton.frame = NSRect(x: 315, y: 12, width: 100, height: 28)
+        actionButton.target = self
+        actionButton.action = #selector(tap)
+        addSubview(actionButton)
+
+        refresh()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func tap() { action() }
+
+    func refresh() {
+        let done = isDone()
+        let symbol = done ? "checkmark.circle.fill" : "circle"
+        iconView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        iconView.contentTintColor = done ? .systemGreen : .tertiaryLabelColor
+        subtitleLabel.stringValue = done ? doneSubtitle : pendingSubtitle
+        actionButton.isHidden = done
+    }
+}
+
 // MARK: - Onboarding Wizard
 
+// A short guided setup: welcome, a live permissions checklist that verifies
+// each requirement as the user grants it, a mic test, and a usage tour.
 class OnboardingWindowController {
     static let shared = OnboardingWindowController()
 
     private var window: NSWindow?
     private var currentStep = 0
     private var stepViews: [NSView] = []
+    private var testStepView: NSView?
     private var progressDots: [NSView] = []
     private var nextButton: NSButton?
-    private var accessibilityTimer: Timer?
+    private var checklistTimer: Timer?
+    private var setupRows: [SetupRow] = []
+    // True when reopened from the menu on an already-running app, so complete()
+    // doesn't start the input monitor / polling a second time.
+    private var isRerun = false
 
-    func show() {
+    private var micAuthorized: Bool {
+        AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+    }
+    private var permissionsSatisfied: Bool { AXIsProcessTrusted() && micAuthorized }
+
+    func show(rerun: Bool = false) {
         if let w = window, w.isVisible {
             w.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
         }
+        isRerun = rerun
         // Show Dock icon during onboarding so the window is discoverable
         NSApp.setActivationPolicy(.regular)
         let w = createWindow()
@@ -1537,33 +1613,32 @@ class OnboardingWindowController {
     private func createWindow() -> NSWindow {
         let w = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 480, height: 360),
-            styleMask: [.titled],  // no close button — user must complete onboarding
+            styleMask: isRerun ? [.titled, .closable] : [.titled],
             backing: .buffered,
             defer: false
         )
-        w.title = "Welcome to Voice"
+        w.title = isRerun ? "Voice Setup" : "Welcome to Voice"
         w.center()
         w.isReleasedWhenClosed = false
         w.isRestorable = false
-        w.level = .floating  // Stay on top so the window doesn't get lost
+        w.level = .floating
 
         guard let contentView = w.contentView else { return w }
 
-        // Build step views
         let welcomeStep = createWelcomeStep(in: contentView)
-        let accessibilityStep = createAccessibilityStep(in: contentView)
-        let micStep = createMicrophoneStep(in: contentView)
+        let permissionsStep = createPermissionsStep(in: contentView)
         let testStep = createTestStep(in: contentView)
         let tourStep = createTourStep(in: contentView)
+        testStepView = testStep
 
-        stepViews = [welcomeStep, accessibilityStep, micStep, testStep, tourStep]
+        stepViews = [welcomeStep, permissionsStep, testStep, tourStep]
         for sv in stepViews {
             sv.isHidden = true
             contentView.addSubview(sv)
         }
 
         // Progress dots at bottom center
-        let stepCount = 5
+        let stepCount = stepViews.count
         let dotContainer = NSView(frame: NSRect(x: 160, y: 16, width: 160, height: 16))
         let dotSize: CGFloat = 8
         let dotSpacing: CGFloat = 20
@@ -1579,7 +1654,6 @@ class OnboardingWindowController {
         }
         contentView.addSubview(dotContainer)
 
-        // Next button (shared across steps, positioned bottom-right)
         let btn = NSButton(frame: NSRect(x: 360, y: 16, width: 100, height: 32))
         btn.title = "Get Started"
         btn.bezelStyle = .rounded
@@ -1594,39 +1668,27 @@ class OnboardingWindowController {
 
     private func showStep(_ step: Int) {
         currentStep = step
-
-        for (i, sv) in stepViews.enumerated() {
-            sv.isHidden = (i != step)
-        }
-
-        // Update progress dots
+        for (i, sv) in stepViews.enumerated() { sv.isHidden = (i != step) }
         for (i, dot) in progressDots.enumerated() {
             dot.layer?.backgroundColor = (i == step)
                 ? NSColor.controlAccentColor.cgColor
                 : NSColor.lightGray.cgColor
         }
 
-        // Update button title and state
+        // Only the permissions step needs live polling.
+        if step == 1 { startChecklistPolling() } else { stopChecklistPolling() }
+
         switch step {
         case 0:
             nextButton?.title = "Get Started"
             nextButton?.isEnabled = true
         case 1:
-            nextButton?.title = "Next"
-            // Disabled until AX granted — startAccessibilityStepPolling manages this
-            nextButton?.isEnabled = AXIsProcessTrusted()
-            // Don't auto-trigger the system dialog — let the user read the context first,
-            // then click "Open System Settings" when ready.
-            startAccessibilityStepPolling()
+            nextButton?.title = "Continue"
+            refreshChecklist()
         case 2:
             nextButton?.title = "Next"
-            // Enabled if mic already authorized
-            let status = AVCaptureDevice.authorizationStatus(for: .audio)
-            nextButton?.isEnabled = (status == .authorized)
-        case 3:
-            nextButton?.title = "Next"
             nextButton?.isEnabled = true
-        case 4:
+        case 3:
             nextButton?.title = "Done"
             nextButton?.isEnabled = true
         default:
@@ -1636,27 +1698,112 @@ class OnboardingWindowController {
 
     @objc private func nextStep() {
         let next = currentStep + 1
-        if next >= stepViews.count {
-            complete()
-        } else {
-            showStep(next)
-        }
+        if next >= stepViews.count { complete() } else { showStep(next) }
     }
 
     private func complete() {
-        accessibilityTimer?.invalidate()
-        accessibilityTimer = nil
+        stopChecklistPolling()
         Settings.shared.onboardingComplete = true
         window?.close()
         window = nil
-        // Revert to menu bar-only (no Dock icon)
         NSApp.setActivationPolicy(.accessory)
-        // Now start the input monitor and accessibility polling
-        // (deferred from launch to avoid system dialog during onboarding)
-        if let appDelegate = NSApp.delegate as? AppDelegate {
+        // On first-run completion, start the services that were deferred during
+        // onboarding. On a menu-triggered rerun they're already running.
+        if !isRerun, let appDelegate = NSApp.delegate as? AppDelegate {
             appDelegate.startAccessibilityPolling()
             _ = appDelegate.inputMonitor.start()
         }
+        isRerun = false
+    }
+
+    // MARK: - Permissions checklist
+
+    private func createPermissionsStep(in container: NSView) -> NSView {
+        let view = NSView(frame: NSRect(x: 0, y: 50, width: 480, height: 300))
+
+        let title = NSTextField(labelWithString: "Set Up Voice")
+        title.font = NSFont.boldSystemFont(ofSize: 18)
+        title.frame = NSRect(x: 40, y: 258, width: 400, height: 30)
+        title.alignment = .center
+        view.addSubview(title)
+
+        let subtitle = NSTextField(wrappingLabelWithString: "Voice checks each item off as you enable it. Everything runs locally on your Mac.")
+        subtitle.font = NSFont.systemFont(ofSize: 13)
+        subtitle.textColor = .secondaryLabelColor
+        subtitle.frame = NSRect(x: 40, y: 222, width: 400, height: 34)
+        subtitle.alignment = .center
+        view.addSubview(subtitle)
+
+        let accessibility = SetupRow(
+            title: "Accessibility",
+            subtitle: "Lets Voice detect your hotkey.",
+            doneSubtitle: "Enabled — Voice can detect your hotkey.",
+            buttonTitle: "Enable",
+            isDone: { AXIsProcessTrusted() },
+            action: {
+                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+            })
+
+        let microphone = SetupRow(
+            title: "Microphone",
+            subtitle: "Lets Voice record your speech.",
+            doneSubtitle: "Enabled — your audio stays on this Mac.",
+            buttonTitle: "Enable",
+            isDone: { [weak self] in self?.micAuthorized ?? false },
+            action: {
+                switch AVCaptureDevice.authorizationStatus(for: .audio) {
+                case .notDetermined:
+                    AVCaptureDevice.requestAccess(for: .audio) { _ in }
+                default:
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!)
+                }
+            })
+
+        let model = Settings.shared.speechModel
+        let speechModel = SetupRow(
+            title: "Speech model",
+            subtitle: "\(model.displayName) · \(model.sizeDescription).",
+            doneSubtitle: "Downloaded and verified.",
+            buttonTitle: "Download",
+            isDone: { Settings.shared.speechModel.isInstalled },
+            action: {
+                ModelDownloadWindowController.shared.ensureModels([Settings.shared.speechModel]) {}
+            })
+
+        setupRows = [accessibility, microphone, speechModel]
+        var y: CGFloat = 160
+        for row in setupRows {
+            row.frame = NSRect(x: 30, y: y, width: 420, height: 52)
+            view.addSubview(row)
+            y -= 56
+        }
+
+        let note = NSTextField(wrappingLabelWithString: "The speech model isn't required to continue — Voice downloads it automatically the first time you dictate.")
+        note.font = NSFont.systemFont(ofSize: 11)
+        note.textColor = .tertiaryLabelColor
+        note.frame = NSRect(x: 40, y: 4, width: 400, height: 34)
+        note.alignment = .center
+        view.addSubview(note)
+
+        return view
+    }
+
+    private func startChecklistPolling() {
+        guard checklistTimer == nil else { return }
+        checklistTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.refreshChecklist()
+        }
+    }
+
+    private func stopChecklistPolling() {
+        checklistTimer?.invalidate()
+        checklistTimer = nil
+    }
+
+    private func refreshChecklist() {
+        for row in setupRows { row.refresh() }
+        // Continue is gated on the two permissions; the model is optional.
+        nextButton?.isEnabled = permissionsSatisfied
     }
 
     // MARK: - Step Builders
@@ -1664,121 +1811,25 @@ class OnboardingWindowController {
     private func createWelcomeStep(in container: NSView) -> NSView {
         let view = NSView(frame: NSRect(x: 0, y: 50, width: 480, height: 300))
 
-        // App icon at top center
-        let iconView = NSImageView(frame: NSRect(x: 190, y: 190, width: 100, height: 100))
-        iconView.image = NSApp.applicationIconImage
-        iconView.imageScaling = .scaleProportionallyUpOrDown
-        view.addSubview(iconView)
-
-        // Title
         let title = NSTextField(labelWithString: "Welcome to Voice")
-        title.font = NSFont.boldSystemFont(ofSize: 20)
-        title.frame = NSRect(x: 40, y: 140, width: 400, height: 40)
+        title.font = NSFont.boldSystemFont(ofSize: 22)
+        title.frame = NSRect(x: 40, y: 210, width: 400, height: 34)
         title.alignment = .center
         view.addSubview(title)
 
-        // Subtitle
-        let subtitle = NSTextField(wrappingLabelWithString: "Press a key, speak, text appears. All processing happens locally on your Mac.")
-        subtitle.font = NSFont.systemFont(ofSize: 14)
-        subtitle.textColor = NSColor.secondaryLabelColor
-        subtitle.frame = NSRect(x: 60, y: 60, width: 360, height: 70)
-        subtitle.alignment = .center
-        view.addSubview(subtitle)
+        let tagline = NSTextField(wrappingLabelWithString: "Hold fn, speak, and release. Your words appear wherever your cursor is — transcribed and cleaned up entirely on your Mac.")
+        tagline.font = NSFont.systemFont(ofSize: 14)
+        tagline.textColor = .secondaryLabelColor
+        tagline.frame = NSRect(x: 50, y: 130, width: 380, height: 70)
+        tagline.alignment = .center
+        view.addSubview(tagline)
 
-        return view
-    }
-
-    private func createAccessibilityStep(in container: NSView) -> NSView {
-        let view = NSView(frame: NSRect(x: 0, y: 50, width: 480, height: 300))
-
-        // Title
-        let title = NSTextField(labelWithString: "Accessibility Permission")
-        title.font = NSFont.boldSystemFont(ofSize: 18)
-        title.frame = NSRect(x: 40, y: 240, width: 400, height: 30)
-        title.alignment = .center
-        view.addSubview(title)
-
-        // Explanation
-        let explanation = NSTextField(wrappingLabelWithString: "Voice needs Accessibility permission to detect your hotkey. Click below to open System Settings, find Voice in the list, and toggle it on.")
-        explanation.font = NSFont.systemFont(ofSize: 14)
-        explanation.textColor = NSColor.secondaryLabelColor
-        explanation.frame = NSRect(x: 40, y: 150, width: 400, height: 80)
-        explanation.alignment = .center
-        view.addSubview(explanation)
-
-        // Open System Settings button
-        let openBtn = NSButton(frame: NSRect(x: 155, y: 115, width: 170, height: 32))
-        openBtn.title = "Open System Settings"
-        openBtn.bezelStyle = .rounded
-        openBtn.target = self
-        openBtn.action = #selector(openAccessibilitySettings)
-        view.addSubview(openBtn)
-
-        // Status label
-        let statusLabel = NSTextField(labelWithString: "Waiting for permission...")
-        statusLabel.font = NSFont.systemFont(ofSize: 13)
-        statusLabel.textColor = NSColor.systemOrange
-        statusLabel.frame = NSRect(x: 40, y: 75, width: 400, height: 28)
-        statusLabel.alignment = .center
-        statusLabel.identifier = NSUserInterfaceItemIdentifier("axStatusLabel")
-        view.addSubview(statusLabel)
-
-        // NOTE: system prompt is triggered in showStep(1), not here,
-        // so it doesn't appear during the Welcome step.
-
-        return view
-    }
-
-    private func createMicrophoneStep(in container: NSView) -> NSView {
-        let view = NSView(frame: NSRect(x: 0, y: 50, width: 480, height: 300))
-
-        // Title
-        let title = NSTextField(labelWithString: "Microphone Permission")
-        title.font = NSFont.boldSystemFont(ofSize: 18)
-        title.frame = NSRect(x: 40, y: 240, width: 400, height: 30)
-        title.alignment = .center
-        view.addSubview(title)
-
-        // Explanation
-        let explanation = NSTextField(wrappingLabelWithString: "Voice records your speech locally using your Mac's microphone. No audio ever leaves your device.")
-        explanation.font = NSFont.systemFont(ofSize: 14)
-        explanation.textColor = NSColor.secondaryLabelColor
-        explanation.frame = NSRect(x: 40, y: 160, width: 400, height: 70)
-        explanation.alignment = .center
-        view.addSubview(explanation)
-
-        let status = AVCaptureDevice.authorizationStatus(for: .audio)
-        if status == .authorized {
-            let statusLabel = NSTextField(labelWithString: "Microphone permission granted!")
-            statusLabel.font = NSFont.systemFont(ofSize: 13)
-            statusLabel.textColor = NSColor.systemGreen
-            statusLabel.frame = NSRect(x: 40, y: 105, width: 400, height: 28)
-            statusLabel.alignment = .center
-            view.addSubview(statusLabel)
-        } else if status == .denied {
-            let instructions = NSTextField(wrappingLabelWithString: "Microphone access was denied. Please go to System Settings > Privacy & Security > Microphone and enable Voice.")
-            instructions.font = NSFont.systemFont(ofSize: 13)
-            instructions.textColor = NSColor.systemRed
-            instructions.frame = NSRect(x: 40, y: 85, width: 400, height: 55)
-            instructions.alignment = .center
-            view.addSubview(instructions)
-        } else {
-            // .notDetermined or other
-            let grantBtn = NSButton(frame: NSRect(x: 165, y: 110, width: 150, height: 32))
-            grantBtn.title = "Grant Permission"
-            grantBtn.bezelStyle = .rounded
-            grantBtn.target = self
-            grantBtn.action = #selector(requestMicrophoneAccess)
-            view.addSubview(grantBtn)
-
-            let statusLabel = NSTextField(labelWithString: "Microphone access required")
-            statusLabel.font = NSFont.systemFont(ofSize: 13)
-            statusLabel.textColor = NSColor.systemOrange
-            statusLabel.frame = NSRect(x: 40, y: 75, width: 400, height: 28)
-            statusLabel.alignment = .center
-            statusLabel.identifier = NSUserInterfaceItemIdentifier("micStatusLabel")
-            view.addSubview(statusLabel)
-        }
+        let privacy = NSTextField(wrappingLabelWithString: "No cloud, no accounts, no data collection. This quick setup takes about a minute.")
+        privacy.font = NSFont.systemFont(ofSize: 12)
+        privacy.textColor = .tertiaryLabelColor
+        privacy.frame = NSRect(x: 50, y: 80, width: 380, height: 40)
+        privacy.alignment = .center
+        view.addSubview(privacy)
 
         return view
     }
@@ -1786,22 +1837,19 @@ class OnboardingWindowController {
     private func createTestStep(in container: NSView) -> NSView {
         let view = NSView(frame: NSRect(x: 0, y: 50, width: 480, height: 300))
 
-        // Title
         let title = NSTextField(labelWithString: "Test Your Setup")
         title.font = NSFont.boldSystemFont(ofSize: 18)
         title.frame = NSRect(x: 40, y: 240, width: 400, height: 30)
         title.alignment = .center
         view.addSubview(title)
 
-        // Instruction
         let instruction = NSTextField(wrappingLabelWithString: "Press the button below and say a few words. We'll transcribe them to confirm everything works.")
         instruction.font = NSFont.systemFont(ofSize: 14)
-        instruction.textColor = NSColor.secondaryLabelColor
+        instruction.textColor = .secondaryLabelColor
         instruction.frame = NSRect(x: 40, y: 170, width: 400, height: 65)
         instruction.alignment = .center
         view.addSubview(instruction)
 
-        // Start Test button
         let testBtn = NSButton(frame: NSRect(x: 175, y: 125, width: 130, height: 32))
         testBtn.title = "Start Test"
         testBtn.bezelStyle = .rounded
@@ -1810,19 +1858,17 @@ class OnboardingWindowController {
         testBtn.identifier = NSUserInterfaceItemIdentifier("testBtn")
         view.addSubview(testBtn)
 
-        // Status label
         let statusLabel = NSTextField(labelWithString: "")
         statusLabel.font = NSFont.systemFont(ofSize: 13)
-        statusLabel.textColor = NSColor.secondaryLabelColor
+        statusLabel.textColor = .secondaryLabelColor
         statusLabel.frame = NSRect(x: 40, y: 90, width: 400, height: 28)
         statusLabel.alignment = .center
         statusLabel.identifier = NSUserInterfaceItemIdentifier("testStatusLabel")
         view.addSubview(statusLabel)
 
-        // Result text field
         let resultField = NSTextField(wrappingLabelWithString: "")
         resultField.font = NSFont.systemFont(ofSize: 13)
-        resultField.textColor = NSColor.labelColor
+        resultField.textColor = .labelColor
         resultField.frame = NSRect(x: 40, y: 50, width: 400, height: 36)
         resultField.alignment = .center
         resultField.identifier = NSUserInterfaceItemIdentifier("testResultField")
@@ -1834,14 +1880,12 @@ class OnboardingWindowController {
     private func createTourStep(in container: NSView) -> NSView {
         let view = NSView(frame: NSRect(x: 0, y: 50, width: 480, height: 300))
 
-        // Title
         let title = NSTextField(labelWithString: "How to Use Voice")
         title.font = NSFont.boldSystemFont(ofSize: 18)
         title.frame = NSRect(x: 40, y: 250, width: 400, height: 30)
         title.alignment = .center
         view.addSubview(title)
 
-        // Tip rows with SF Symbols
         let tips: [(String, String)] = [
             ("fn", "Hold fn to record, release to transcribe"),
             ("waveform.path", "A waveform overlay appears while recording"),
@@ -1852,37 +1896,33 @@ class OnboardingWindowController {
 
         var y = 220
         for (iconName, text) in tips {
-            // Icon
             let iconView = NSImageView(frame: NSRect(x: 50, y: y - 4, width: 20, height: 20))
-            if let img = NSImage(systemSymbolName: iconName, accessibilityDescription: nil) {
-                iconView.image = img
-                iconView.contentTintColor = NSColor.controlAccentColor
-            } else {
-                // Fallback for "fn" which isn't an SF Symbol
+            if iconName == "fn" {
                 let label = NSTextField(labelWithString: "fn")
                 label.font = NSFont.boldSystemFont(ofSize: 11)
-                label.textColor = NSColor.controlAccentColor
+                label.textColor = .controlAccentColor
                 label.frame = NSRect(x: 50, y: y - 2, width: 20, height: 18)
                 label.alignment = .center
                 view.addSubview(label)
+            } else if let img = NSImage(systemSymbolName: iconName, accessibilityDescription: nil) {
+                iconView.image = img
+                iconView.contentTintColor = .controlAccentColor
             }
             iconView.imageScaling = .scaleProportionallyUpOrDown
             view.addSubview(iconView)
 
-            // Text
             let tipLabel = NSTextField(labelWithString: text)
             tipLabel.font = NSFont.systemFont(ofSize: 13)
-            tipLabel.textColor = NSColor.secondaryLabelColor
+            tipLabel.textColor = .secondaryLabelColor
             tipLabel.frame = NSRect(x: 80, y: y - 2, width: 360, height: 20)
             view.addSubview(tipLabel)
 
             y -= 34
         }
 
-        // Footer note
         let footer = NSTextField(labelWithString: "Voice lives in your menu bar — no Dock icon needed.")
         footer.font = NSFont.systemFont(ofSize: 11)
-        footer.textColor = NSColor.tertiaryLabelColor
+        footer.textColor = .tertiaryLabelColor
         footer.frame = NSRect(x: 40, y: 30, width: 400, height: 18)
         footer.alignment = .center
         view.addSubview(footer)
@@ -1890,107 +1930,37 @@ class OnboardingWindowController {
         return view
     }
 
-    // MARK: - Accessibility Step Polling
-
-    private func startAccessibilityStepPolling() {
-        accessibilityTimer?.invalidate()
-        accessibilityTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            if AXIsProcessTrusted() {
-                self.accessibilityTimer?.invalidate()
-                self.accessibilityTimer = nil
-                // Update status label to green
-                if let stepView = self.stepViews.indices.contains(1) ? self.stepViews[1] : nil {
-                    for subview in stepView.subviews {
-                        if let label = subview as? NSTextField,
-                           label.identifier?.rawValue == "axStatusLabel" {
-                            label.stringValue = "Permission granted!"
-                            label.textColor = NSColor.systemGreen
-                            break
-                        }
-                    }
-                }
-                self.nextButton?.isEnabled = true
-            }
-        }
-    }
-
-    // MARK: - Actions
-
-    @objc private func openAccessibilitySettings() {
-        // Just open System Settings — no system dialog. Our onboarding already explains everything.
-        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
-    }
-
-    @objc private func requestMicrophoneAccess() {
-        AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                if granted {
-                    self.nextButton?.isEnabled = true
-                    // Update mic step UI
-                    if let stepView = self.stepViews.indices.contains(2) ? self.stepViews[2] : nil {
-                        for subview in stepView.subviews {
-                            if let label = subview as? NSTextField,
-                               label.identifier?.rawValue == "micStatusLabel" {
-                                label.stringValue = "Microphone permission granted!"
-                                label.textColor = NSColor.systemGreen
-                                break
-                            }
-                        }
-                    }
-                    // Auto-advance
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                        if self?.currentStep == 2 {
-                            self?.nextStep()
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // MARK: - Mic Test
 
     @objc private func startTestRecording() {
-        guard let stepView = stepViews.indices.contains(3) ? stepViews[3] : nil else { return }
+        guard let stepView = testStepView else { return }
 
-        // Update UI
         for subview in stepView.subviews {
-            if let label = subview as? NSTextField,
-               label.identifier?.rawValue == "testStatusLabel" {
+            if let label = subview as? NSTextField, label.identifier?.rawValue == "testStatusLabel" {
                 label.stringValue = "Listening..."
-                label.textColor = NSColor.secondaryLabelColor
+                label.textColor = .secondaryLabelColor
             }
-            if let label = subview as? NSTextField,
-               label.identifier?.rawValue == "testResultField" {
+            if let label = subview as? NSTextField, label.identifier?.rawValue == "testResultField" {
                 label.stringValue = ""
             }
-            if let btn = subview as? NSButton,
-               btn.identifier?.rawValue == "testBtn" {
+            if let btn = subview as? NSButton, btn.identifier?.rawValue == "testBtn" {
                 btn.isEnabled = false
             }
         }
         nextButton?.isEnabled = false
 
         guard let delegate = NSApp.delegate as? AppDelegate else { return }
-
-        // Start recording using AppDelegate's methods
         delegate.startRecording()
 
-        // Stop after 3 seconds and transcribe
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
             guard let self = self else { return }
-
-            // Update status
             for subview in stepView.subviews {
-                if let label = subview as? NSTextField,
-                   label.identifier?.rawValue == "testStatusLabel" {
+                if let label = subview as? NSTextField, label.identifier?.rawValue == "testStatusLabel" {
                     label.stringValue = "Transcribing..."
                 }
             }
-
             delegate.stopRecording()
 
-            // Poll for transcription result (wait up to 10s)
             var checkCount = 0
             Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] timer in
                 checkCount += 1
@@ -2008,22 +1978,19 @@ class OnboardingWindowController {
 
     private func showTestResult(transcription: String?, stepView: NSView) {
         for subview in stepView.subviews {
-            if let label = subview as? NSTextField,
-               label.identifier?.rawValue == "testStatusLabel" {
+            if let label = subview as? NSTextField, label.identifier?.rawValue == "testStatusLabel" {
                 if let text = transcription, !text.isEmpty {
                     label.stringValue = "Everything works! You're all set."
-                    label.textColor = NSColor.systemGreen
+                    label.textColor = .systemGreen
                 } else {
-                    label.stringValue = "Something went wrong. You can try again or finish setup."
-                    label.textColor = NSColor.systemOrange
+                    label.stringValue = "Nothing was transcribed. You can try again or finish setup."
+                    label.textColor = .systemOrange
                 }
             }
-            if let label = subview as? NSTextField,
-               label.identifier?.rawValue == "testResultField" {
+            if let label = subview as? NSTextField, label.identifier?.rawValue == "testResultField" {
                 label.stringValue = transcription ?? ""
             }
-            if let btn = subview as? NSButton,
-               btn.identifier?.rawValue == "testBtn" {
+            if let btn = subview as? NSButton, btn.identifier?.rawValue == "testBtn" {
                 btn.isEnabled = true
             }
         }
@@ -2095,7 +2062,7 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
     private var sensitivityLabel: NSTextField!
 
     // Transcription tab controls
-    private var whisperPopup: NSPopUpButton!
+    private var speechModelPopup: NSPopUpButton!
     private var downloadButton: NSButton!
     private var downloadStatusLabel: NSTextField!
     private var saveTranscriptsCheckbox: NSButton!
@@ -2106,22 +2073,41 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
     private var transcriptCountLabel: NSTextField!
 
     override func loadView() {
-        self.view = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 380))
+        self.view = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 420))
     }
 
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        tabView = NSTabView(frame: view.bounds.insetBy(dx: 12, dy: 12))
+        // Sticky footer, shown under every tab: a separator and the always-
+        // visible Reset to Defaults button.
+        let footerHeight: CGFloat = 44
+        let separator = NSBox(frame: NSRect(x: 0, y: footerHeight, width: view.bounds.width, height: 1))
+        separator.boxType = .separator
+        separator.autoresizingMask = [.width, .maxYMargin]
+        view.addSubview(separator)
+
+        let resetBtn = NSButton(title: "Reset to Defaults", target: self, action: #selector(resetToDefaults))
+        resetBtn.frame = NSRect(x: view.bounds.width - 12 - 150, y: 8, width: 150, height: 28)
+        resetBtn.bezelStyle = .rounded
+        resetBtn.autoresizingMask = [.minXMargin, .maxYMargin]
+        view.addSubview(resetBtn)
+
+        let footerNote = NSTextField(labelWithString: "Restores all preferences to their defaults.")
+        footerNote.font = NSFont.systemFont(ofSize: 11)
+        footerNote.textColor = .tertiaryLabelColor
+        footerNote.frame = NSRect(x: 14, y: 14, width: 280, height: 16)
+        footerNote.autoresizingMask = [.maxYMargin]
+        view.addSubview(footerNote)
+
+        tabView = NSTabView(frame: NSRect(x: 12, y: footerHeight + 8,
+                                          width: view.bounds.width - 24,
+                                          height: view.bounds.height - footerHeight - 20))
         tabView.autoresizingMask = [.width, .height]
         view.addSubview(tabView)
+        rebuildTabs(selectedIndex: 0)
 
-        tabView.addTabViewItem(makeAudioTab())
-        tabView.addTabViewItem(makeGeneralTab())
-        tabView.addTabViewItem(makeAITab())
-        tabView.addTabViewItem(makeTranscriptionTab())
-
-        // Listen for audio device changes (per D-06: live mic list updates)
+        // Listen for audio device changes (live mic list updates)
         var propAddr = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -2130,6 +2116,19 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &propAddr, DispatchQueue.main) { [weak self] _, _ in
             self?.refreshMicList()
         }
+    }
+
+    // Rebuilds every tab from current settings. Used at load and after a reset,
+    // so all controls reflect the same source of truth rather than a hand-kept
+    // list that can drift from the real defaults.
+    private func rebuildTabs(selectedIndex: Int) {
+        for item in tabView.tabViewItems { tabView.removeTabViewItem(item) }
+        tabView.addTabViewItem(makeAudioTab())
+        tabView.addTabViewItem(makeGeneralTab())
+        tabView.addTabViewItem(makeAITab())
+        tabView.addTabViewItem(makeTranscriptionTab())
+        let count = tabView.numberOfTabViewItems
+        if count > 0 { tabView.selectTabViewItem(at: max(0, min(selectedIndex, count - 1))) }
     }
 
     // MARK: - General Tab
@@ -2171,7 +2170,7 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         y -= 40
 
         // POPO timeout
-        addLabel("POPO timeout (minutes):", at: NSPoint(x: 20, y: y), in: container)
+        addLabel("Hands-free timeout (min):", at: NSPoint(x: 20, y: y), in: container)
         popoLabel = NSTextField(labelWithString: "\(Settings.shared.popoTimeout)")
         popoLabel.frame = NSRect(x: 200, y: y, width: 30, height: 22)
         popoLabel.alignment = .center
@@ -2192,14 +2191,6 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         clipboardCheckbox.frame = NSRect(x: 20, y: y, width: 280, height: 22)
         clipboardCheckbox.state = Settings.shared.clipboardRestore ? .on : .off
         container.addSubview(clipboardCheckbox)
-
-        // Reset to defaults — bottom right
-        let resetBtn = NSButton(title: "Reset to Defaults", target: self, action: #selector(resetToDefaults))
-        resetBtn.frame = NSRect(x: 290, y: 12, width: 140, height: 24)
-        resetBtn.bezelStyle = .rounded
-        resetBtn.controlSize = .small
-        resetBtn.font = NSFont.systemFont(ofSize: 11)
-        container.addSubview(resetBtn)
 
         item.view = container
         return item
@@ -2279,9 +2270,11 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         container.addSubview(overlayFontSizeSegment)
         y -= 24
 
-        addLabel("Sensitivity:", at: NSPoint(x: 40, y: y + 2), in: container)
+        addLabel("Waveform:", at: NSPoint(x: 40, y: y + 2), in: container)
         sensitivitySlider = NSSlider(value: Double(Settings.shared.overlaySensitivity), minValue: 5, maxValue: 80, target: self, action: #selector(sensitivityChanged))
         sensitivitySlider.frame = NSRect(x: 140, y: y, width: 120, height: 22)
+        // Display only: scales the overlay bars. Does not change mic gain or transcription.
+        sensitivitySlider.toolTip = "How tall the overlay waveform bounces (shown live below). Visual only \u{2014} doesn't affect recording or accuracy."
         container.addSubview(sensitivitySlider)
         sensitivityLabel = NSTextField(labelWithString: "\(Int(Settings.shared.overlaySensitivity))x")
         sensitivityLabel.frame = NSRect(x: 265, y: y + 2, width: 40, height: 18)
@@ -2356,6 +2349,7 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         let val = Int(sensitivitySlider.doubleValue)
         Settings.shared.overlaySensitivity = Float(val)
         sensitivityLabel.stringValue = "\(val)x"
+        overlayPreview?.needsDisplay = true
     }
 
     @objc private func overlayFontSizeChanged() {
@@ -2455,15 +2449,15 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
 
         // Speech model — compact row
         addLabel("Model:", at: NSPoint(x: 20, y: y), in: container)
-        whisperPopup = NSPopUpButton(frame: NSRect(x: 75, y: y - 2, width: 200, height: 24), pullsDown: false)
+        speechModelPopup = NSPopUpButton(frame: NSRect(x: 75, y: y - 2, width: 200, height: 24), pullsDown: false)
         for model in ModelCatalog.speechModels {
-            whisperPopup.addItem(withTitle: model.displayName)
-            whisperPopup.lastItem?.representedObject = model.id
+            speechModelPopup.addItem(withTitle: model.displayName)
+            speechModelPopup.lastItem?.representedObject = model.id
         }
-        whisperPopup.selectItem(at: ModelCatalog.speechModels.firstIndex { $0.id == Settings.shared.speechModelID } ?? 0)
-        whisperPopup.target = self
-        whisperPopup.action = #selector(whisperModelChanged)
-        container.addSubview(whisperPopup)
+        speechModelPopup.selectItem(at: ModelCatalog.speechModels.firstIndex { $0.id == Settings.shared.speechModelID } ?? 0)
+        speechModelPopup.target = self
+        speechModelPopup.action = #selector(speechModelChanged)
+        container.addSubview(speechModelPopup)
 
         downloadButton = NSButton(title: "Download", target: self, action: #selector(downloadModel))
         downloadButton.frame = NSRect(x: 280, y: y - 2, width: 75, height: 24)
@@ -2732,27 +2726,10 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         alert.alertStyle = .warning
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
+        let selected = tabView.indexOfTabViewItem(tabView.selectedTabViewItem ?? tabView.tabViewItems.first!)
         Settings.shared.resetAll()
-
-        // Refresh all visible controls
-        hotkeyPopup?.selectItem(at: 0)
-        soundsCheckbox?.state = .on
-        autoStartCheckbox?.state = .on
-        popoStepper?.integerValue = 5
-        popoLabel?.stringValue = "5"
-        clipboardCheckbox?.state = .on
-        aiEnabledCheckbox?.state = .on
-        overlayEnabledCheckbox?.state = .on
-        overlayAppNameCheckbox?.state = .on
-        overlayAppIconCheckbox?.state = .on
-        overlayBgSlider?.doubleValue = 0.6
-        overlayBgLabel?.stringValue = "60%"
-        overlayFontSizeSegment?.selectedSegment = 1  // Medium
-        sensitivitySlider?.doubleValue = 30
-        sensitivityLabel?.stringValue = "30x"
-        overlayPreview?.fontSize = 13
-        overlayPreview?.resizeToFit()
-        refreshMicList()
+        // Rebuild every tab so all controls reflect the restored defaults.
+        rebuildTabs(selectedIndex: selected)
 
         if let delegate = NSApp.delegate as? AppDelegate {
             delegate.inputMonitor.reloadHotkey()
@@ -2766,8 +2743,8 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
         }
     }
 
-    @objc private func whisperModelChanged() {
-        if let id = whisperPopup.selectedItem?.representedObject as? String {
+    @objc private func speechModelChanged() {
+        if let id = speechModelPopup.selectedItem?.representedObject as? String {
             Settings.shared.speechModelID = id
         }
         updateDownloadButton()
@@ -2903,7 +2880,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     var isRestartingEngine = false
     var audioFileHandle: FileHandle?
     var audioDataSize: UInt32 = 0
-    var currentAudioLevel: Float = 0.0  // Exposed for waveform overlay (Plan 03)
+    var currentAudioLevel: Float = 0.0  // Exposed for waveform overlay
     var zeroBufferCount: Int = 0
     var zeroSignalWarningShown: Bool = false
     var audioFile: String?
@@ -2919,7 +2896,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     var dismissTimer: Timer?
     var lastTranscription: String?
-    var settingsMenuItem: NSMenuItem?
 
     // Every quit path (menu, relaunch, logout) lands here. Models must be
     // freed before exit or ggml's Metal teardown aborts the process.
@@ -3016,17 +2992,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         menu.addItem(NSMenuItem.separator())
 
         // Settings & Quit
-        settingsMenuItem = NSMenuItem(title: "Settings\u{2026}", action: #selector(openSettings), keyEquivalent: ",")
-        settingsMenuItem?.target = self
-        if #available(macOS 14.0, *), let settingsMenuItem {
-            settingsMenuItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
-        }
-        if let settingsMenuItem {
-            menu.addItem(settingsMenuItem)
-        }
+        let settingsItem = NSMenuItem(title: "Settings\u{2026}", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        if #available(macOS 14.0, *) { settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil) }
+        menu.addItem(settingsItem)
         let updateItem = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
         updateItem.target = self
         menu.addItem(updateItem)
+        let setupItem = NSMenuItem(title: "Run Setup Again\u{2026}", action: #selector(runSetupAgain), keyEquivalent: "")
+        setupItem.target = self
+        menu.addItem(setupItem)
         menu.addItem(NSMenuItem.separator())
         let quitItem = NSMenuItem(title: "Quit Voice", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
@@ -3053,9 +3028,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             self?.stopPopo()
         }
 
-        // First-launch onboarding (per D-05)
+        // First-launch onboarding
         if !Settings.shared.onboardingComplete {
             OnboardingWindowController.shared.show()
+        } else if ProcessInfo.processInfo.environment["VOICE_FORCE_ONBOARDING"] != nil {
+            // Dev/preview hook: reopen the setup wizard on an already-set-up app.
+            OnboardingWindowController.shared.show(rerun: true)
         }
 
         inputMonitor.reloadHotkey()
@@ -3063,7 +3041,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // AXIsProcessTrusted() can trigger the system dialog on macOS Sequoia.
         // The onboarding completion handler will start these.
         if Settings.shared.onboardingComplete {
-            // Start accessibility polling for auto-restart (per D-19, D-20)
+            // Start accessibility polling for auto-restart
             startAccessibilityPolling()
 
             if !inputMonitor.start() {
@@ -3238,7 +3216,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         switch state {
         case .recording, .popo:
-            // Pass target app context (per D-14, D-15)
+            // Pass target app context
             if let app = previousApp {
                 contentView.targetAppName = app.localizedName ?? ""
                 contentView.targetAppIcon = app.icon
@@ -3271,12 +3249,41 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
     }
 
-    // MARK: - Recording
+    // MARK: - Audio Capture
+
+    // Push-to-talk (.recording) and hands-free (.popo) share one capture path;
+    // they differ only in state, sounds and the hands-free safety timeout.
 
     func startRecording() {
+        beginCapture(popo: false)
+    }
+
+    func startPopo() {
+        beginCapture(popo: true)
+    }
+
+    func stopRecording() {
+        guard case .recording = appState else { return }
+        endCapture(transcribe: true, sound: "Pop")
+    }
+
+    func stopPopo() {
+        guard case .popo = appState else { return }
+        endCapture(transcribe: true, sound: "Submarine")
+    }
+
+    func cancelRecording() {
+        switch appState {
+        case .recording, .popo:
+            endCapture(transcribe: false, sound: "Funk")
+        default:
+            break
+        }
+    }
+
+    private func beginCapture(popo: Bool) {
         guard case .idle = appState else { return }
 
-        // Reset zero-signal detection state (per D-08)
         zeroBufferCount = 0
         zeroSignalWarningShown = false
 
@@ -3286,37 +3293,109 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         SpeechEngine.shared.prepare(speech: Settings.shared.speechModel, cleanup: Settings.shared.aiEnabled)
 
         // Show feedback immediately — before engine start
-        appState = .recording
+        appState = popo ? .popo : .recording
         inputMonitor.setRecording(true)
+        if popo { inputMonitor.setPopo(true) }
         updateIcon()
-        showOverlay(state: .recording)
-        if Settings.shared.soundsEnabled { playSound("Tink") }
+        showOverlay(state: popo ? .popo : .recording)
+        if Settings.shared.soundsEnabled { playSound(popo ? "Morse" : "Tink") }
 
+        // WAV with a 44-byte placeholder header, finalized in endCapture
         let tempFile = NSTemporaryDirectory() + "voice_\(ProcessInfo.processInfo.globallyUniqueString).wav"
         audioFile = tempFile
-
-        // Create WAV file with 44-byte placeholder header
         FileManager.default.createFile(atPath: tempFile, contents: Data(count: 44))
         guard let handle = FileHandle(forWritingAtPath: tempFile) else {
-            appState = .idle
-            inputMonitor.setRecording(false)
-            updateIcon()
-            hideOverlay()
-            showNotification(title: "Voice", body: "Failed to create audio file")
+            abortCapture("Failed to create audio file")
             return
         }
         handle.seek(toFileOffset: 44)
         audioFileHandle = handle
         audioDataSize = 0
 
+        if let error = startCaptureEngine() {
+            abortCapture(error)
+            return
+        }
+
+        if popo {
+            popoTimer = Timer.scheduledTimer(withTimeInterval: Settings.shared.popoTimeoutSeconds, repeats: false) { [weak self] _ in
+                self?.stopPopo()
+                self?.showNotification(title: "Voice", body: "Hands-free mode auto-stopped after \(Settings.shared.popoTimeout) minutes.")
+            }
+        }
+    }
+
+    private func abortCapture(_ message: String) {
+        audioFileHandle?.closeFile()
+        audioFileHandle = nil
+        if let file = audioFile { cleanup(file) }
+        audioFile = nil
+        appState = .idle
+        inputMonitor.setRecording(false)
+        inputMonitor.setPopo(false)
+        updateIcon()
+        hideOverlay()
+        showNotification(title: "Voice", body: message)
+    }
+
+    private func endCapture(transcribe: Bool, sound: String) {
+        popoTimer?.invalidate()
+        popoTimer = nil
+        inputMonitor.setRecording(false)
+        inputMonitor.setPopo(false)
+
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine?.stop()
+        // Delay dealloc — AVAudioIOUnit dispatch queue may have in-flight callbacks
+        let engineRef = audioEngine
+        audioEngine = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { _ = engineRef }
+
+        if transcribe, let handle = audioFileHandle {
+            writeWAVHeader(to: handle, dataSize: audioDataSize)
+        }
+        audioFileHandle?.closeFile()
+        audioFileHandle = nil
+        if Settings.shared.soundsEnabled { playSound(sound) }
+
+        guard transcribe else {
+            if let file = audioFile { cleanup(file) }
+            audioFile = nil
+            appState = .idle
+            updateIcon()
+            hideOverlay()
+            return
+        }
+
+        appState = .processing
+        updateIcon()
+        showOverlay(state: .transcribing)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.transcribeAndProcess()
+        }
+    }
+
+    // Re-create the engine mid-capture after a device change (Bluetooth reconnect).
+    // Keeps appending to the same WAV file.
+    func restartRecordingEngine() {
+        isRestartingEngine = true
+        defer { DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.isRestartingEngine = false } }
+        if let error = startCaptureEngine() {
+            NSLog("Voice: engine restart after device change failed: %@", error)
+        }
+    }
+
+    // Starts an AVAudioEngine on the selected mic, converting input to 16 kHz
+    // mono Int16 appended to audioFileHandle. Returns an error message on failure.
+    private func startCaptureEngine() -> String? {
         var engine = AVAudioEngine()
         var inputNode = engine.inputNode
 
-        // Set selected microphone via CoreAudio (per D-05/D-07)
+        // Set selected microphone via CoreAudio; a mic that has disappeared
+        // falls back to the system default silently.
         let selectedUID = Settings.shared.micDeviceUID
         if !selectedUID.isEmpty {
-            let devices = listInputDevices()
-            if let device = devices.first(where: { $0.uid == selectedUID }) {
+            if let device = listInputDevices().first(where: { $0.uid == selectedUID }) {
                 var deviceID = device.deviceID
                 let status = AudioUnitSetProperty(
                     inputNode.audioUnit!,
@@ -3330,14 +3409,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                     NSLog("Voice: Failed to set mic device %@ (status %d), using default", selectedUID, status)
                 }
             } else {
-                // Per D-07: selected mic disappeared, fall back to system default silently
                 NSLog("Voice: Preferred mic %@ not found, using system default", selectedUID)
             }
         }
 
         var hwFormat = inputNode.outputFormat(forBus: 0)
-        NSLog("Voice: hwFormat — sampleRate=%.0f channels=%d", hwFormat.sampleRate, hwFormat.channelCount)
-
         // If format is invalid (0 channels / 0 sample rate), the device selection failed silently.
         // Reset to system default and retry with a fresh engine.
         if hwFormat.channelCount == 0 || hwFormat.sampleRate == 0 {
@@ -3346,90 +3422,56 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             engine = AVAudioEngine()
             inputNode = engine.inputNode
             hwFormat = inputNode.outputFormat(forBus: 0)
-            NSLog("Voice: retry hwFormat — sampleRate=%.0f channels=%d", hwFormat.sampleRate, hwFormat.channelCount)
         }
-
         guard hwFormat.channelCount > 0, hwFormat.sampleRate > 0 else {
-            appState = .idle
-            inputMonitor.setRecording(false)
-            updateIcon()
-            hideOverlay()
-            showNotification(title: "Voice", body: "No valid microphone found")
-            NSLog("Voice: FATAL — no valid audio format even with system default mic")
-            return
+            return "No valid microphone found"
         }
 
-        guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true) else {
-            appState = .idle
-            inputMonitor.setRecording(false)
-            updateIcon()
-            hideOverlay()
-            showNotification(title: "Voice", body: "Failed to create audio format")
-            return
-        }
-
-        guard let converter = AVAudioConverter(from: hwFormat, to: targetFormat) else {
-            appState = .idle
-            inputMonitor.setRecording(false)
-            updateIcon()
-            hideOverlay()
-            showNotification(title: "Voice", body: "Failed to create audio converter (hw: \(hwFormat))")
+        guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true),
+              let converter = AVAudioConverter(from: hwFormat, to: targetFormat) else {
             NSLog("Voice: converter creation failed — hwFormat=%@", hwFormat.description)
-            return
+            return "Failed to create audio converter"
         }
 
-        var tapCallCount = 0
         let tapBlock: AVAudioNodeTapBlock = { [weak self] buffer, _ in
             guard let self = self else { return }
-            tapCallCount += 1
-            // Convert to 16kHz mono Int16
-            let ratio = 16000.0 / hwFormat.sampleRate
-            let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio)
-            if tapCallCount <= 3 {
-                NSLog("Voice: tap#%d bufFrames=%d ratio=%.4f capacity=%d fileHandleNil=%d",
-                      tapCallCount, Int(buffer.frameLength), ratio, Int(capacity), self.audioFileHandle == nil ? 1 : 0)
-            }
+            let capacity = AVAudioFrameCount(Double(buffer.frameLength) * 16000.0 / hwFormat.sampleRate)
             guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: max(capacity, 1)) else { return }
             var error: NSError?
-            let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
+            converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
                 outStatus.pointee = .haveData
                 return buffer
             }
-            converter.convert(to: convertedBuffer, error: &error, withInputFrom: inputBlock)
-            if tapCallCount <= 3 {
-                NSLog("Voice: tap#%d converted frameLength=%d error=%@",
-                      tapCallCount, Int(convertedBuffer.frameLength), error?.localizedDescription ?? "nil")
+            guard error == nil, let channelData = convertedBuffer.int16ChannelData else { return }
+            let frameCount = Int(convertedBuffer.frameLength)
+            self.audioFileHandle?.write(Data(bytes: channelData[0], count: frameCount * 2))
+            self.audioDataSize += UInt32(frameCount * 2)
+
+            // RMS level for the waveform overlay
+            var sum: Float = 0
+            for i in 0..<frameCount {
+                let sample = Float(channelData[0][i]) / 32768.0
+                sum += sample * sample
             }
-            if error == nil, let channelData = convertedBuffer.int16ChannelData {
-                let frameCount = Int(convertedBuffer.frameLength)
-                let data = Data(bytes: channelData[0], count: frameCount * 2)
-                self.audioFileHandle?.write(data)
-                self.audioDataSize += UInt32(frameCount * 2)
-                // Calculate RMS level from Int16 data for waveform visualization
-                var sum: Float = 0
-                for i in 0..<frameCount {
-                    let sample = Float(channelData[0][i]) / 32768.0
-                    sum += sample * sample
+            let rms = sqrt(sum / Float(max(frameCount, 1)))
+            DispatchQueue.main.async {
+                self.currentAudioLevel = rms
+                // Zero-signal detection (AirPods/Bluetooth mics that deliver silence)
+                guard rms < 0.0001 else {
+                    self.zeroBufferCount = 0
+                    return
                 }
-                let rms = sqrt(sum / Float(max(frameCount, 1)))
-                // Zero-signal detection for AirPods/Bluetooth (per D-08)
-                DispatchQueue.main.async {
-                    self.currentAudioLevel = rms
-                    if rms < 0.0001 {
-                        self.zeroBufferCount += 1
-                        // ~2 seconds of silence at 16kHz with 4096 buffer = ~8 buffers
-                        if self.zeroBufferCount > 8 && !self.zeroSignalWarningShown {
-                            self.zeroSignalWarningShown = true
-                            self.showOverlay(state: .error("No audio detected \u{2014} check your microphone"))
-                            // Auto-dismiss warning after 3 seconds and return to recording overlay
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                                if self.appState == .recording {
-                                    self.showOverlay(state: .recording)
-                                }
-                            }
-                        }
-                    } else {
-                        self.zeroBufferCount = 0
+                self.zeroBufferCount += 1
+                // ~2 seconds of silence at 16kHz with 4096 buffer = ~8 buffers
+                guard self.zeroBufferCount > 8, !self.zeroSignalWarningShown else { return }
+                self.zeroSignalWarningShown = true
+                self.showOverlay(state: .error("No audio detected \u{2014} check your microphone"))
+                // Return to the capture overlay after 3 seconds
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                    switch self.appState {
+                    case .recording: self.showOverlay(state: .recording)
+                    case .popo: self.showOverlay(state: .popo)
+                    default: break
                     }
                 }
             }
@@ -3439,424 +3481,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         let tapOK = VoiceExceptionCatcher.run {
             inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat, block: tapBlock)
         }
-        if !tapOK {
-            appState = .idle
-            inputMonitor.setRecording(false)
-            updateIcon()
-            hideOverlay()
-            audioFileHandle?.closeFile()
-            audioFileHandle = nil
-            if let f = audioFile { cleanup(f) }
-            audioFile = nil
-            showNotification(title: "Voice", body: "Microphone unavailable — try again")
-            return
-        }
+        guard tapOK else { return "Microphone unavailable — try again" }
 
         engine.prepare()
         do {
             try engine.start()
-            self.audioEngine = engine
-            NSLog("Voice: engine started OK — sampleRate=%.0f channels=%d format=%@",
-                  hwFormat.sampleRate, hwFormat.channelCount, hwFormat.description)
         } catch {
             inputNode.removeTap(onBus: 0)
-            audioFileHandle?.closeFile()
-            audioFileHandle = nil
-            appState = .idle
-            inputMonitor.setRecording(false)
-            updateIcon()
-            hideOverlay()
-            showNotification(title: "Voice", body: "Failed to start recording: \(error.localizedDescription)")
             NSLog("Voice: engine.start() FAILED: %@", error.localizedDescription)
+            return "Failed to start recording: \(error.localizedDescription)"
         }
-    }
-
-    // Re-create AVAudioEngine mid-recording after device change (Bluetooth reconnect)
-    func restartRecordingEngine() {
-        isRestartingEngine = true
-        defer { DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.isRestartingEngine = false } }
-        let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
-
-        let selectedUID = Settings.shared.micDeviceUID
-        if !selectedUID.isEmpty {
-            let devices = listInputDevices()
-            if let device = devices.first(where: { $0.uid == selectedUID }) {
-                var deviceID = device.deviceID
-                AudioUnitSetProperty(
-                    inputNode.audioUnit!,
-                    kAudioOutputUnitProperty_CurrentDevice,
-                    kAudioUnitScope_Global,
-                    0,
-                    &deviceID,
-                    UInt32(MemoryLayout<AudioDeviceID>.size)
-                )
-            }
-        }
-
-        let hwFormat = inputNode.outputFormat(forBus: 0)
-        guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true),
-              let converter = AVAudioConverter(from: hwFormat, to: targetFormat) else {
-            NSLog("Voice: restartRecordingEngine — failed to create format/converter")
-            return
-        }
-
-        var tapCallCount = 0
-        let tapBlock: AVAudioNodeTapBlock = { [weak self] buffer, _ in
-            guard let self = self else { return }
-            tapCallCount += 1
-            let ratio = 16000.0 / hwFormat.sampleRate
-            let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio)
-            guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: max(capacity, 1)) else { return }
-            var error: NSError?
-            let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
-                outStatus.pointee = .haveData
-                return buffer
-            }
-            converter.convert(to: convertedBuffer, error: &error, withInputFrom: inputBlock)
-            if error == nil, let channelData = convertedBuffer.int16ChannelData {
-                let frameCount = Int(convertedBuffer.frameLength)
-                let data = Data(bytes: channelData[0], count: frameCount * 2)
-                self.audioFileHandle?.write(data)
-                self.audioDataSize += UInt32(frameCount * 2)
-                var sum: Float = 0
-                for i in 0..<frameCount {
-                    let sample = Float(channelData[0][i]) / 32768.0
-                    sum += sample * sample
-                }
-                let rms = sqrt(sum / Float(max(frameCount, 1)))
-                DispatchQueue.main.async { self.currentAudioLevel = rms }
-            }
-        }
-        let tapOK = VoiceExceptionCatcher.run {
-            inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat, block: tapBlock)
-        }
-        if !tapOK {
-            NSLog("Voice: restartRecordingEngine — installTap raised, giving up")
-            return
-        }
-
-        engine.prepare()
-        do {
-            try engine.start()
-            self.audioEngine = engine
-            NSLog("Voice: engine restarted OK after device change — sampleRate=%.0f", hwFormat.sampleRate)
-        } catch {
-            inputNode.removeTap(onBus: 0)
-            NSLog("Voice: restartRecordingEngine FAILED: %@", error.localizedDescription)
-        }
-    }
-
-    func stopRecording() {
-        guard case .recording = appState else { return }
-
-        NSLog("Voice: stopRecording — audioDataSize=%d audioFile=%@", audioDataSize, audioFile ?? "nil")
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine?.stop()
-        // Delay dealloc — AVAudioIOUnit dispatch queue may have in-flight callbacks
-        let engineRef = audioEngine
-        audioEngine = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { _ = engineRef }
-        // Finalize WAV header with actual data size
-        if let handle = audioFileHandle {
-            writeWAVHeader(to: handle, dataSize: audioDataSize)
-            handle.closeFile()
-        }
-        audioFileHandle = nil
-
-        appState = .processing
-        inputMonitor.setRecording(false)
-        updateIcon()
-        showOverlay(state: .transcribing)
-        if Settings.shared.soundsEnabled { playSound("Pop") }
-
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.transcribeAndProcess()
-        }
-    }
-
-    func cancelRecording() {
-        guard case .recording = appState else {
-            // Also handle cancel during POPO
-            if case .popo = appState {
-                cancelPopo()
-            }
-            return
-        }
-
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine?.stop()
-        let engineRef = audioEngine
-        audioEngine = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { _ = engineRef }
-        audioFileHandle?.closeFile()
-        audioFileHandle = nil
-
-        if let file = audioFile {
-            cleanup(file)
-        }
-        audioFile = nil
-
-        appState = .idle
-        inputMonitor.setRecording(false)
-        updateIcon()
-        hideOverlay()
-        if Settings.shared.soundsEnabled { playSound("Funk") }
-    }
-
-    // MARK: - POPO Mode
-
-    func startPopo() {
-        NSLog("Voice: startPopo called — appState=\(appState)")
-        guard case .idle = appState else {
-            NSLog("Voice: startPopo BLOCKED — appState is not idle")
-            return
-        }
-
-        // Reset zero-signal detection state (per D-08)
-        zeroBufferCount = 0
-        zeroSignalWarningShown = false
-
-        previousApp = NSWorkspace.shared.frontmostApplication
-        // Load models while the user talks, so they're warm at release.
-        SpeechEngine.shared.prepare(speech: Settings.shared.speechModel, cleanup: Settings.shared.aiEnabled)
-
-        // Show feedback immediately — before engine start
-        appState = .popo
-        inputMonitor.setRecording(true)
-        inputMonitor.setPopo(true)
-        updateIcon()
-        showOverlay(state: .popo)
-        if Settings.shared.soundsEnabled { playSound("Morse") }
-
-        let tempFile = NSTemporaryDirectory() + "voice_\(ProcessInfo.processInfo.globallyUniqueString).wav"
-        audioFile = tempFile
-
-        // Create WAV file with 44-byte placeholder header
-        FileManager.default.createFile(atPath: tempFile, contents: Data(count: 44))
-        guard let handle = FileHandle(forWritingAtPath: tempFile) else {
-            appState = .idle
-            inputMonitor.setRecording(false)
-            inputMonitor.setPopo(false)
-            updateIcon()
-            hideOverlay()
-            showNotification(title: "Voice", body: "Failed to create audio file")
-            return
-        }
-        handle.seek(toFileOffset: 44)
-        audioFileHandle = handle
-        audioDataSize = 0
-
-        var engine = AVAudioEngine()
-        var inputNode = engine.inputNode
-
-        // Set selected microphone via CoreAudio (per D-05/D-07)
-        let selectedUID = Settings.shared.micDeviceUID
-        if !selectedUID.isEmpty {
-            let devices = listInputDevices()
-            if let device = devices.first(where: { $0.uid == selectedUID }) {
-                var deviceID = device.deviceID
-                let status = AudioUnitSetProperty(
-                    inputNode.audioUnit!,
-                    kAudioOutputUnitProperty_CurrentDevice,
-                    kAudioUnitScope_Global,
-                    0,
-                    &deviceID,
-                    UInt32(MemoryLayout<AudioDeviceID>.size)
-                )
-                if status != noErr {
-                    NSLog("Voice: POPO — Failed to set mic device %@ (status %d), using default", selectedUID, status)
-                }
-            } else {
-                NSLog("Voice: POPO — Preferred mic %@ not found, using system default", selectedUID)
-            }
-        }
-
-        var hwFormat = inputNode.outputFormat(forBus: 0)
-        NSLog("Voice: POPO hwFormat — sampleRate=%.0f channels=%d", hwFormat.sampleRate, hwFormat.channelCount)
-
-        // If format is invalid, reset to system default
-        if hwFormat.channelCount == 0 || hwFormat.sampleRate == 0 {
-            NSLog("Voice: POPO invalid hwFormat — resetting mic to system default")
-            Settings.shared.micDeviceUID = ""
-            engine = AVAudioEngine()
-            inputNode = engine.inputNode
-            hwFormat = inputNode.outputFormat(forBus: 0)
-            NSLog("Voice: POPO retry hwFormat — sampleRate=%.0f channels=%d", hwFormat.sampleRate, hwFormat.channelCount)
-        }
-
-        guard hwFormat.channelCount > 0, hwFormat.sampleRate > 0 else {
-            audioFileHandle?.closeFile()
-            audioFileHandle = nil
-            appState = .idle
-            inputMonitor.setRecording(false)
-            inputMonitor.setPopo(false)
-            updateIcon()
-            hideOverlay()
-            showNotification(title: "Voice", body: "No valid microphone found")
-            return
-        }
-
-        guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true),
-              let converter = AVAudioConverter(from: hwFormat, to: targetFormat) else {
-            audioFileHandle?.closeFile()
-            audioFileHandle = nil
-            appState = .idle
-            inputMonitor.setRecording(false)
-            inputMonitor.setPopo(false)
-            updateIcon()
-            hideOverlay()
-            showNotification(title: "Voice", body: "Failed to create audio converter")
-            return
-        }
-
-        let tapBlock: AVAudioNodeTapBlock = { [weak self] buffer, _ in
-            guard let self = self else { return }
-            let ratio = 16000.0 / hwFormat.sampleRate
-            let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio)
-            guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: max(capacity, 1)) else { return }
-            var error: NSError?
-            let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
-                outStatus.pointee = .haveData
-                return buffer
-            }
-            converter.convert(to: convertedBuffer, error: &error, withInputFrom: inputBlock)
-            if error == nil, let channelData = convertedBuffer.int16ChannelData {
-                let frameCount = Int(convertedBuffer.frameLength)
-                let data = Data(bytes: channelData[0], count: frameCount * 2)
-                self.audioFileHandle?.write(data)
-                self.audioDataSize += UInt32(frameCount * 2)
-                // Calculate RMS level from Int16 data for waveform visualization
-                var sum: Float = 0
-                for i in 0..<frameCount {
-                    let sample = Float(channelData[0][i]) / 32768.0
-                    sum += sample * sample
-                }
-                let rms = sqrt(sum / Float(max(frameCount, 1)))
-                // Zero-signal detection for AirPods/Bluetooth (per D-08)
-                DispatchQueue.main.async {
-                    self.currentAudioLevel = rms
-                    if rms < 0.0001 {
-                        self.zeroBufferCount += 1
-                        // ~2 seconds of silence at 16kHz with 4096 buffer = ~8 buffers
-                        if self.zeroBufferCount > 8 && !self.zeroSignalWarningShown {
-                            self.zeroSignalWarningShown = true
-                            self.showOverlay(state: .error("No audio detected \u{2014} check your microphone"))
-                            // Auto-dismiss warning after 3 seconds and return to popo overlay
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                                if self.appState == .popo {
-                                    self.showOverlay(state: .popo)
-                                }
-                            }
-                        }
-                    } else {
-                        self.zeroBufferCount = 0
-                    }
-                }
-            }
-        }
-        let tapOK = VoiceExceptionCatcher.run {
-            inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat, block: tapBlock)
-        }
-        if !tapOK {
-            audioFileHandle?.closeFile()
-            audioFileHandle = nil
-            appState = .idle
-            inputMonitor.setRecording(false)
-            inputMonitor.setPopo(false)
-            updateIcon()
-            hideOverlay()
-            showNotification(title: "Voice", body: "Microphone unavailable — try again")
-            return
-        }
-
-        engine.prepare()
-        do {
-            try engine.start()
-            self.audioEngine = engine
-
-            // Safety timeout
-            let timeout = Settings.shared.popoTimeoutSeconds
-            popoTimer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self] _ in
-                DispatchQueue.main.async {
-                    self?.stopPopo()
-                    self?.showNotification(title: "Voice", body: "POPO mode auto-stopped after \(Settings.shared.popoTimeout) minutes.")
-                }
-            }
-        } catch {
-            inputNode.removeTap(onBus: 0)
-            audioFileHandle?.closeFile()
-            audioFileHandle = nil
-            appState = .idle
-            inputMonitor.setRecording(false)
-            inputMonitor.setPopo(false)
-            updateIcon()
-            hideOverlay()
-            showNotification(title: "Voice", body: "Failed to start recording: \(error.localizedDescription)")
-        }
-    }
-
-    func stopPopo() {
-        guard case .popo = appState else { return }
-
-        popoTimer?.invalidate()
-        popoTimer = nil
-        inputMonitor.setPopo(false)
-
-        guard audioEngine != nil else {
-            appState = .idle
-            inputMonitor.setRecording(false)
-            updateIcon()
-            hideOverlay()
-            return
-        }
-
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine?.stop()
-        let popoEngineRef = audioEngine
-        audioEngine = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { _ = popoEngineRef }
-        // Finalize WAV header with actual data size
-        if let handle = audioFileHandle {
-            writeWAVHeader(to: handle, dataSize: audioDataSize)
-            handle.closeFile()
-        }
-        audioFileHandle = nil
-
-        appState = .processing
-        inputMonitor.setRecording(false)
-        updateIcon()
-        showOverlay(state: .transcribing)
-        if Settings.shared.soundsEnabled { playSound("Submarine") }
-
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.transcribeAndProcess()
-        }
-    }
-
-    func cancelPopo() {
-        popoTimer?.invalidate()
-        popoTimer = nil
-        inputMonitor.setPopo(false)
-
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine?.stop()
-        let cancelPopoEngineRef = audioEngine
-        audioEngine = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { _ = cancelPopoEngineRef }
-        audioFileHandle?.closeFile()
-        audioFileHandle = nil
-
-        if let file = audioFile {
-            cleanup(file)
-        }
-        audioFile = nil
-
-        appState = .idle
-        inputMonitor.setRecording(false)
-        updateIcon()
-        hideOverlay()
-        if Settings.shared.soundsEnabled { playSound("Funk") }
+        audioEngine = engine
+        NSLog("Voice: engine started — sampleRate=%.0f channels=%d", hwFormat.sampleRate, hwFormat.channelCount)
+        return nil
     }
 
     // MARK: - Transcription & Processing
@@ -3999,6 +3636,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                                 willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         completionHandler([.banner, .sound])
+    }
+
+    @objc func runSetupAgain() {
+        OnboardingWindowController.shared.show(rerun: true)
     }
 
     @objc func openSettings() {
