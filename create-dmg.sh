@@ -50,8 +50,8 @@ else
     echo "  Users will need to right-click > Open on first launch." >&2
 fi
 
-# --- Build (engine + app bundle; no helper binaries or dylibs) ---
-"${SCRIPT_DIR}/build-app.sh"
+# --- Build (universal arm64 + x86_64; no helper binaries or dylibs) ---
+VOICE_UNIVERSAL=1 "${SCRIPT_DIR}/build-app.sh"
 
 # --- Sign ---
 echo "Signing..."

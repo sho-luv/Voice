@@ -137,7 +137,7 @@ See [MODELS.md](MODELS.md) for benchmarks and the model selection history.
 
 ## Requirements
 
-- macOS 13+ on Apple Silicon
+- macOS 13+ on Apple Silicon or Intel (universal binary)
 - To build: Xcode Command Line Tools (`xcode-select --install`), [Homebrew](https://brew.sh), and `cmake`
 
 The installer installs `cmake` if needed, builds the engine, and installs the app. The app downloads its models on first launch.

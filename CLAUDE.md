@@ -7,7 +7,7 @@ Privacy-first macOS dictation: hold fn, speak, release, and the text is inserted
 - **No Xcode project.** Build with `swiftc` via the shell scripts.
 - **Privacy.** Audio and transcripts never leave the Mac. The only network access is SHA-256-verified model downloads from Hugging Face and the user-initiated update check. Don't add analytics or remote AI.
 - **Self-contained.** The app bundle is one statically linked executable. No helper binaries, dylibs or Homebrew at runtime.
-- **Platform.** macOS 13+, Apple Silicon only.
+- **Platform.** macOS 13+, universal (Apple Silicon + Intel). Apple Silicon uses Metal; the Intel slice runs on CPU (AVX2). `VOICE_UNIVERSAL=1` builds both arches (releases); dev builds default to the host arch.
 - **Languages.** Both ASR models are multilingual (Parakeet TDT v3 auto-detects; Whisper takes a language code or "auto"). The `transcriptionLanguage` setting steers Whisper and gates the English-only text cleanup — `polishTranscript` only runs the hesitation/LLM cleanup for English or Automatic.
 - **License.** Keep SPDX headers on new source files. Credit new dependencies or models in `THIRD_PARTY_NOTICES.md`.
 
