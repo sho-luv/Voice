@@ -20,6 +20,7 @@ Privacy-first macOS dictation: hold fn, speak, release, and the text is inserted
 | `engine/VoiceEngine.{h,cpp}` | C wrapper over whisper.cpp (Whisper + Parakeet) and llama.cpp |
 | `engine/build.sh` | Builds `engine/build/libvoiceengine.a` from pinned whisper.cpp/llama.cpp tags against one shared ggml |
 | `build-app.sh` | Engine, then `swiftc`, then `Voice.app`. Used by `install.sh` and `create-dmg.sh` |
+| `icon.svg`, `render-icon.sh` | Vector icon master; the script regenerates `icon.png`, `Voice.icns` and the website icons |
 | `voice.sh` | Optional terminal companion (Homebrew `whisper-cli` + `sox`) |
 | `MODELS.md` | Model benchmarks and selection history. Read it before changing a model or the cleanup prompt |
 
