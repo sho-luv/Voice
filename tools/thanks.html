@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Thank you</title>
+<!-- faradaysoft.com/thanks: Stripe's after-payment redirect lands here, and this opens Voice. -->
+<meta http-equiv="refresh" content="1; url=voice://thanks">
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #141414; color: #F3EEE6;
+         font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  main { max-width: 36rem; padding: 2rem; }
+  h1 { font: 900 clamp(3rem, 14vw, 7rem)/0.85 system-ui, -apple-system, sans-serif; letter-spacing: -0.03em;
+       font-stretch: condensed; margin: 0 0 1.5rem; text-transform: uppercase; }
+  p { font-size: 0.95rem; line-height: 1.5; opacity: 0.6; margin: 0 0 1.5rem; }
+  a.button { display: inline-block; background: #FF2E2E; color: #fff; text-decoration: none; font-weight: 800;
+             font-family: system-ui, -apple-system, sans-serif; padding: 1rem 1.6rem; border-radius: 16px;
+             box-shadow: 0 5px 0 #a61e1e; }
+  a.button:active { transform: translateY(4px); box-shadow: 0 1px 0 #a61e1e; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Thank<br>you.</h1>
+  <p>That keeps Voice free for everyone. Voice should open on its own; if it doesn't, press the button.</p>
+  <a class="button" href="voice://thanks">OPEN VOICE</a>
+</main>
+</body>
+</html>

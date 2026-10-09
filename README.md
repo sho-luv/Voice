@@ -58,16 +58,26 @@ When transcript saving is enabled, each finished transcription is written to a l
 
 Browse this from **Settings... > Transcription**. By default files are stored in `~/Documents/Voice Transcripts`.
 
+## The Look
+
+Voice 4.0 shares the design language of Lock Chimes: one tactile 3D hero (a clay microphone you can click and flick-spin), very few colors, big compressed display type, mono spec-sheet labels, press-down buttons, and a synthesized click or clunk on every interaction. The hero is also a control: click it in the main window to start or stop hands-free dictation. While you hold fn, the same mic stands in the overlay pill and swells with your voice.
+
+**Customize Look** (menu bar, or the palette button) switches between four themes, Midnight, Paper, Electric and Hazard, and four microphones: Stage (handheld), Vintage (fifties slot grille on a yoke), Ribbon (ring, spokes, copper body) and Podcast (foam-tipped broadcast mic on a desk stand). The hero, the overlay and the menu bar follow both choices. UI sounds can be turned off there.
+
+## Support Voice
+
+Voice is free and nothing in it is locked. The **Support Voice** screen (menu bar, or the heart button) is a pay-what-you-want, one-time tip through a Stripe Payment Link that opens in your browser. After paying, Stripe's thank-you page sends you back to the app (`voice://thanks`) and Voice shows a supporter badge. There is no license check; the badge is for you. See [SUPPORT.md](SUPPORT.md) for how the link is set up.
+
 ## Settings
 
-Open from the menu bar (click the waveform icon > "Settings...") or press **Cmd+,**.
+Open from the menu bar (click the waveform icon > "Settings...") or press **Cmd+,**. Settings live under the hero in four panels: General, Audio, AI and History.
 
 ### General
 
 | Setting | Description | Default |
 |---------|-------------|---------|
 | Push-to-talk key | fn, Right Option, Left Option, or Right Cmd | fn |
-| Sounds | Audio feedback for recording start/stop/done | On |
+| UI sounds | Synthesized clicks for the interface and for recording start/stop/done | On |
 | Auto-start on login | Install/remove LaunchAgent | On |
 | Hands-free timeout | Safety auto-stop for hands-free mode (1-30 min) | 5 min |
 | Restore clipboard after paste | Saves and restores clipboard when using Cmd+V paste | On |
@@ -78,7 +88,7 @@ Open from the menu bar (click the waveform icon > "Settings...") or press **Cmd+
 |---------|-------------|---------|
 | Microphone | Input device, or the system default | System default |
 | Show overlay | Floating recording overlay, with optional app name, app icon, and timer | On |
-| Background, font size | Overlay appearance | 60%, medium |
+| Background, font size | Overlay appearance; the pill uses the theme's colors | 85%, medium |
 | Waveform | How tall the overlay waveform bounces. Visual only; doesn't affect recording or transcription | 30x |
 
 ### AI
@@ -89,7 +99,7 @@ Open from the menu bar (click the waveform icon > "Settings...") or press **Cmd+
 | Custom instructions | Optional rewrite guardrails appended to the cleanup prompt | Blank |
 | Custom vocabulary | Names, acronyms, and technical terms. Their spelling is restored in every transcript; the Whisper model also uses them to bias recognition | Blank |
 
-### Transcription
+### History
 
 | Setting | Description | Default |
 |---------|-------------|---------|
@@ -98,6 +108,7 @@ Open from the menu bar (click the waveform icon > "Settings...") or press **Cmd+
 | Download Model | Download the selected model if not already on disk | -- |
 | Save transcripts | Save each transcription to a local text file | On |
 | Transcript directory | Folder used for saved transcript files | `~/Documents/Voice Transcripts` |
+| Search | Full-text search of saved transcripts; click a row to copy it | -- |
 
 All settings persist across restarts via `UserDefaults` (`~/Library/Preferences/com.faradaysoft.voice.plist`).
 
@@ -137,7 +148,7 @@ See [MODELS.md](MODELS.md) for benchmarks and the model selection history.
 
 ## Requirements
 
-- macOS 13+ on Apple Silicon or Intel (universal binary)
+- macOS 14 (Sonoma) or later on Apple Silicon or Intel (universal binary)
 - To build: Xcode Command Line Tools (`xcode-select --install`), [Homebrew](https://brew.sh), and `cmake`
 
 The installer installs `cmake` if needed, builds the engine, and installs the app. The app downloads its models on first launch.
@@ -167,6 +178,16 @@ codesign --force --sign - --options runtime --entitlements Voice.entitlements Vo
 # Run
 open Voice.app
 ```
+
+To look at a screen without going through the app, the build has a preview mode that opens one window (the running copy of Voice can stay up) and can save a screenshot:
+
+```bash
+./Voice.app/Contents/MacOS/Voice -screen home -tab audio -theme paper -shot home.png
+# screens: home, onboarding (-step 0..3), look, support, thanks, download, overlay, overlay-popo, overlay-done, overlay-error
+# -mic stage|vintage|ribbon|podcast picks the hero for the shot
+```
+
+The app icon is rendered from the same 3D mic: `swiftc -O Design/HeroModel.swift tools/icon/main.swift -o build/render_icon && build/render_icon icon.png`, then `iconutil` (see `tools/icon/main.swift`).
 
 To check the engine without the UI, run the headless self-test. It loads the installed models, transcribes the given WAV files (16 kHz mono PCM), and runs the AI cleanup test battery:
 
