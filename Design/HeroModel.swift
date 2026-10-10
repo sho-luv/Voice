@@ -120,66 +120,94 @@ enum MicModel {
         return Nodes(root: root, head: head, headMaterial: headMaterial, standMaterial: standMaterial, lampMaterial: lampMaterial)
     }
 
-    // MARK: Vintage (a fifties pill head with slot grilles, cradled in a yoke)
+    // MARK: Vintage (a fifties "55": tall rounded head, vertical chrome ribs over a coloured mesh)
 
     static func makeVintage(head headColor: NSColor, stand standColor: NSColor) -> Nodes {
         let root = SCNNode()
         let body = SCNNode()
-        body.eulerAngles = SCNVector3(-0.22, 0, 0) // tips back a little, like it's on a stand
-        body.position = SCNVector3(0, 0.3, 0)
+        body.eulerAngles = SCNVector3(-0.24, 0, 0) // tips back a little, like it's on a stand
+        body.position = SCNVector3(0, 0.12, 0)
         root.addChildNode(body)
 
-        let headMaterial = clay(headColor, roughness: 0.75)
-        headMaterial.multiply.contents = slotTile
+        // The head is a drum (the coloured mesh) under a chrome dome, with chrome ribs around
+        // the front. The whole group is flattened front-to-back so it reads as the 55's pill shape.
+        let headMaterial = clay(headColor, roughness: 0.85)
+        headMaterial.multiply.contents = grilleTile
         headMaterial.multiply.wrapS = .repeat
         headMaterial.multiply.wrapT = .repeat
-        headMaterial.multiply.contentsTransform = SCNMatrix4MakeScale(1, 2, 1)
-        let box = SCNBox(width: 1.12, height: 1.42, length: 0.74, chamferRadius: 0.33)
-        box.chamferSegmentCount = 12
-        box.materials = [headMaterial]
-        let head = SCNNode(geometry: box)
-        head.position = SCNVector3(0, 0.3, 0)
+        headMaterial.multiply.contentsTransform = SCNMatrix4MakeScale(4, 4, 1)
+        let standMaterial = clay(standColor, roughness: 0.55)
+        let chrome = clay(standColor, roughness: 0.4)
+        let drumRadius: CGFloat = 0.48
+        let drumHeight: CGFloat = 1.0
+        let head = SCNNode()
+        head.position = SCNVector3(0, 0.5, 0)
+        head.scale = SCNVector3(1, 1, 0.78)
         body.addChildNode(head)
 
-        let standMaterial = clay(standColor, roughness: 0.6)
-        // The split down the front, and the pivot buttons on the sides.
-        let split = SCNBox(width: 0.05, height: 1.2, length: 0.05, chamferRadius: 0.02)
-        split.materials = [standMaterial]
-        let splitNode = SCNNode(geometry: split)
-        splitNode.position = SCNVector3(0, 0.3, 0.36)
-        body.addChildNode(splitNode)
-        for sign: CGFloat in [-1, 1] {
-            let pivot = SCNCylinder(radius: 0.1, height: 0.08)
-            pivot.materials = [standMaterial]
-            let pivotNode = SCNNode(geometry: pivot)
-            pivotNode.eulerAngles = SCNVector3(0, 0, CGFloat.pi / 2)
-            pivotNode.position = SCNVector3(sign * 0.6, 0.3, 0)
-            body.addChildNode(pivotNode)
+        let drum = SCNCylinder(radius: drumRadius, height: drumHeight)
+        drum.radialSegmentCount = 64
+        drum.materials = [headMaterial]
+        head.addChildNode(SCNNode(geometry: drum))
+        let dome = SCNSphere(radius: drumRadius)
+        dome.segmentCount = 48
+        dome.materials = [chrome]
+        let domeNode = SCNNode(geometry: dome)
+        domeNode.position = SCNVector3(0, drumHeight / 2, 0)
+        head.addChildNode(domeNode)
+
+        // Eleven ribs around the front 160 degrees; the centre one is the split bar.
+        for i in 0..<11 {
+            let angle = (-80.0 + Double(i) * 16.0) * .pi / 180
+            let rib = SCNBox(width: i == 5 ? 0.09 : 0.06, height: drumHeight + 0.02, length: 0.05, chamferRadius: 0.02)
+            rib.materials = [chrome]
+            let ribNode = SCNNode(geometry: rib)
+            ribNode.position = SCNVector3((drumRadius + 0.02) * sin(angle), 0, (drumRadius + 0.02) * cos(angle))
+            ribNode.eulerAngles = SCNVector3(0, angle, 0)
+            head.addChildNode(ribNode)
         }
 
-        // Yoke: a U under the head, in the upright frame.
-        let yoke = SCNShape(path: uPath(outer: 0.82, inner: 0.7, legHeight: 0.6), extrusionDepth: 0.14)
-        yoke.chamferRadius = 0.03
-        yoke.materials = [standMaterial]
-        let yokeNode = SCNNode(geometry: yoke)
-        yokeNode.position = SCNVector3(0, 0.3, 0)
-        root.addChildNode(yokeNode)
+        // Solid band around the bottom of the head.
+        let band = SCNCylinder(radius: drumRadius + 0.07, height: 0.2)
+        band.radialSegmentCount = 64
+        band.materials = [standMaterial]
+        let bandNode = SCNNode(geometry: band)
+        bandNode.position = SCNVector3(0, -drumHeight / 2 - 0.02, 0)
+        head.addChildNode(bandNode)
+        let headSize = (w: drumRadius * 2, h: drumHeight, d: drumRadius * 2 * 0.78)
 
-        let stem = SCNCylinder(radius: 0.09, height: 0.3)
+        // Pivot: thumb screws on both sides of the band.
+        for sign: CGFloat in [-1, 1] {
+            let knob = SCNCylinder(radius: 0.1, height: 0.08)
+            knob.radialSegmentCount = 24
+            knob.materials = [standMaterial]
+            let knobNode = SCNNode(geometry: knob)
+            knobNode.eulerAngles = SCNVector3(0, 0, CGFloat.pi / 2)
+            knobNode.position = SCNVector3(sign * (headSize.w / 2 + 0.1), -0.05, 0)
+            body.addChildNode(knobNode)
+        }
+
+        // Wedge neck (the badge block) in the upright frame, then the stand.
+        let neck = SCNBox(width: 0.46, height: 0.52, length: 0.4, chamferRadius: 0.06)
+        neck.materials = [standMaterial]
+        let neckNode = SCNNode(geometry: neck)
+        neckNode.position = SCNVector3(0, -0.2, -0.02)
+        root.addChildNode(neckNode)
+        let stem = SCNCylinder(radius: 0.08, height: 0.3)
         stem.materials = [standMaterial]
         let stemNode = SCNNode(geometry: stem)
         stemNode.position = SCNVector3(0, floorY + 0.2, 0)
         root.addChildNode(stemNode)
-        let base = SCNCylinder(radius: 0.46, height: 0.1)
+        let base = SCNCylinder(radius: 0.48, height: 0.08)
         base.radialSegmentCount = 64
         base.materials = [standMaterial]
         let baseNode = SCNNode(geometry: base)
-        baseNode.position = SCNVector3(0, floorY + 0.05, 0)
+        baseNode.position = SCNVector3(0, floorY + 0.04, 0)
         root.addChildNode(baseNode)
 
         let lampMaterial = lamp()
-        let lampNode = SCNNode(geometry: lampSphere(lampMaterial, radius: 0.05))
-        lampNode.position = SCNVector3(0, -0.48, 0.1)
+        let lampNode = SCNNode(geometry: lampSphere(lampMaterial, radius: 0.045))
+        lampNode.position = SCNVector3(0, -0.05, 0.2)
         root.addChildNode(lampNode)
 
         return Nodes(root: root, head: head, headMaterial: headMaterial, standMaterial: standMaterial, lampMaterial: lampMaterial)
@@ -252,78 +280,102 @@ enum MicModel {
         return Nodes(root: root, head: head, headMaterial: headMaterial, standMaterial: standMaterial, lampMaterial: lampMaterial)
     }
 
-    // MARK: Podcast (a foam-tipped broadcast mic in a yoke, on a desk stand)
+    // MARK: Podcast (a slim broadcast mic, foam over the front half, side pivot on a tall desk stand)
 
     static func makePodcast(head headColor: NSColor, stand standColor: NSColor) -> Nodes {
         let root = SCNNode()
-        // The barrel tilts; the yoke hinges on its sides and tilts with it, and the
-        // stand hangs from the yoke's bottom, so nothing pokes out past the body.
-        let tilt: CGFloat = 0.5
+        let tilt: CGFloat = 0.55
+        let pivotY: CGFloat = 0.42
+        // The body hangs off a side pivot; it tilts, the stand doesn't.
         let body = SCNNode()
         body.eulerAngles = SCNVector3(0, 0, tilt)
-        body.position = SCNVector3(-0.38, 0.4, 0)
+        body.position = SCNVector3(0.02, pivotY, 0)
         root.addChildNode(body)
 
         let standMaterial = clay(standColor, roughness: 0.7)
-        let barrel = SCNCylinder(radius: 0.3, height: 1.1)
+        let bodyRadius: CGFloat = 0.23
+        let barrel = SCNCylinder(radius: bodyRadius, height: 1.25)
         barrel.radialSegmentCount = 48
         barrel.materials = [standMaterial]
         body.addChildNode(SCNNode(geometry: barrel))
-        let tail = SCNSphere(radius: 0.3)
-        tail.segmentCount = 32
-        tail.materials = [standMaterial]
-        let tailNode = SCNNode(geometry: tail)
-        tailNode.position = SCNVector3(0, -0.55, 0)
-        body.addChildNode(tailNode)
+        // Flat rear with a soft edge.
+        let tailRim = SCNTorus(ringRadius: bodyRadius - 0.04, pipeRadius: 0.04)
+        tailRim.materials = [standMaterial]
+        let tailRimNode = SCNNode(geometry: tailRim)
+        tailRimNode.position = SCNVector3(0, -0.625, 0)
+        body.addChildNode(tailRimNode)
 
-        // Foam windscreen: extra-rough clay with a stronger felt normal, no grille.
+        // Foam windscreen over the front half: extra-rough clay, stronger felt normal, no grille.
         let headMaterial = clay(headColor, roughness: 1.0)
         headMaterial.normal.intensity = 1.0
         headMaterial.normal.contentsTransform = SCNMatrix4MakeScale(6, 6, 1)
-        let foam = SCNCapsule(capRadius: 0.37, height: 0.95)
+        let foam = SCNCapsule(capRadius: bodyRadius + 0.035, height: 0.78)
         foam.capSegmentCount = 24
         foam.materials = [headMaterial]
         let head = SCNNode(geometry: foam)
-        head.position = SCNVector3(0, 0.7, 0)
+        head.position = SCNVector3(0, 0.44, 0)
         body.addChildNode(head)
 
-        // Yoke in the body's frame: pivots on the barrel's sides, arc under the tail.
-        let yokeCenterY: CGFloat = -0.45
-        let yoke = SCNShape(path: uPath(outer: 0.47, inner: 0.39, legHeight: -yokeCenterY), extrusionDepth: 0.1)
-        yoke.chamferRadius = 0.02
-        yoke.materials = [standMaterial]
-        let yokeNode = SCNNode(geometry: yoke)
-        yokeNode.position = SCNVector3(0, yokeCenterY, 0)
-        body.addChildNode(yokeNode)
-        for sign: CGFloat in [-1, 1] {
-            let knob = SCNCylinder(radius: 0.09, height: 0.08)
-            knob.materials = [standMaterial]
-            let knobNode = SCNNode(geometry: knob)
-            knobNode.eulerAngles = SCNVector3(0, 0, CGFloat.pi / 2)
-            knobNode.position = SCNVector3(sign * 0.44, 0, 0)
-            body.addChildNode(knobNode)
-        }
+        // Collar where foam meets body, and the status lamp on it.
+        let collar = SCNTorus(ringRadius: bodyRadius, pipeRadius: 0.025)
+        collar.materials = [standMaterial]
+        let collarNode = SCNNode(geometry: collar)
+        collarNode.position = SCNVector3(0, 0.04, 0)
+        body.addChildNode(collarNode)
+        let lampMaterial = lamp()
+        let lampNode = SCNNode(geometry: lampSphere(lampMaterial, radius: 0.035))
+        lampNode.position = SCNVector3(0, 0.0, bodyRadius + 0.01)
+        body.addChildNode(lampNode)
 
-        // Where the yoke's bottom lands in the upright frame; the stem drops from there.
-        let yokeBottomLocal = CGPoint(x: 0, y: yokeCenterY - 0.47)
-        let bottom = CGPoint(x: body.position.x - yokeBottomLocal.y * sin(tilt),
-                             y: body.position.y + yokeBottomLocal.y * cos(tilt))
-        let stem = SCNCylinder(radius: 0.065, height: bottom.y - floorY)
-        stem.materials = [standMaterial]
-        let stemNode = SCNNode(geometry: stem)
-        stemNode.position = SCNVector3(bottom.x, (bottom.y + floorY) / 2, 0)
-        root.addChildNode(stemNode)
-        let base = SCNCylinder(radius: 0.58, height: 0.07)
+        // Side pivot: a thumb-screw knob on the camera side of the body, at its middle.
+        let knob = SCNCylinder(radius: 0.11, height: 0.07)
+        knob.radialSegmentCount = 32
+        knob.materials = [standMaterial]
+        let knobNode = SCNNode(geometry: knob)
+        knobNode.eulerAngles = SCNVector3(CGFloat.pi / 2, 0, 0)
+        knobNode.position = SCNVector3(0, 0, bodyRadius + 0.04)
+        body.addChildNode(knobNode)
+
+        // Single arm from the pivot down and back to the top of the pole (upright frame).
+        let armZ = bodyRadius + 0.04
+        let armDrop: CGFloat = 0.32
+        let armDown = SCNBox(width: 0.07, height: armDrop, length: 0.07, chamferRadius: 0.02)
+        armDown.materials = [standMaterial]
+        let armDownNode = SCNNode(geometry: armDown)
+        armDownNode.position = SCNVector3(0.02, pivotY - armDrop / 2, armZ)
+        root.addChildNode(armDownNode)
+        let armBack = SCNBox(width: 0.07, height: 0.07, length: armZ + 0.07, chamferRadius: 0.02)
+        armBack.materials = [standMaterial]
+        let armBackNode = SCNNode(geometry: armBack)
+        armBackNode.position = SCNVector3(0.02, pivotY - armDrop, armZ / 2)
+        root.addChildNode(armBackNode)
+
+        // Tall thin pole with a knurled adjustment collar, on a wide flat base.
+        let poleTop = pivotY - armDrop
+        let pole = SCNCylinder(radius: 0.045, height: poleTop - floorY)
+        pole.radialSegmentCount = 32
+        pole.materials = [standMaterial]
+        let poleNode = SCNNode(geometry: pole)
+        poleNode.position = SCNVector3(0.02, (poleTop + floorY) / 2, 0)
+        root.addChildNode(poleNode)
+        let knurl = SCNCylinder(radius: 0.085, height: 0.2)
+        knurl.radialSegmentCount = 12 // faceted on purpose: reads as a grip
+        knurl.materials = [standMaterial]
+        let knurlNode = SCNNode(geometry: knurl)
+        knurlNode.position = SCNVector3(0.02, floorY + 0.45, 0)
+        root.addChildNode(knurlNode)
+        let base = SCNCylinder(radius: 0.6, height: 0.05)
         base.radialSegmentCount = 64
         base.materials = [standMaterial]
         let baseNode = SCNNode(geometry: base)
-        baseNode.position = SCNVector3(bottom.x, floorY + 0.035, 0)
+        baseNode.position = SCNVector3(0.02, floorY + 0.025, 0)
         root.addChildNode(baseNode)
-
-        let lampMaterial = lamp()
-        let lampNode = SCNNode(geometry: lampSphere(lampMaterial, radius: 0.045))
-        lampNode.position = SCNVector3(0, 0.12, 0.3)
-        body.addChildNode(lampNode)
+        let baseStep = SCNCylinder(radius: 0.42, height: 0.04)
+        baseStep.radialSegmentCount = 64
+        baseStep.materials = [standMaterial]
+        let baseStepNode = SCNNode(geometry: baseStep)
+        baseStepNode.position = SCNVector3(0.02, floorY + 0.07, 0)
+        root.addChildNode(baseStepNode)
 
         return Nodes(root: root, head: head, headMaterial: headMaterial, standMaterial: standMaterial, lampMaterial: lampMaterial)
     }
@@ -361,6 +413,20 @@ enum MicModel {
         sphere.materials = [material]
         return sphere
     }
+
+    /// Opaque vertical bars with transparent gaps: the chrome ribs of a fifties mic, as a cut-out.
+    static let ribTile: CGImage = {
+        let size = 128
+        let context = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: size * 4,
+                                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.clear(CGRect(x: 0, y: 0, width: size, height: size))
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        let pitch = 16
+        for col in 0..<(size / pitch) {
+            context.fill(CGRect(x: col * pitch + 4, y: 0, width: 8, height: size))
+        }
+        return context.makeImage()!
+    }()
 
     /// White tile with dark horizontal bars: the slot grille of a fifties mic.
     static let slotTile: CGImage = {
