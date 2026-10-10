@@ -8,6 +8,10 @@
 
 Voice is a menu bar app that replaces cloud-based dictation with fast, private, local transcription. It works everywhere -- terminals, browsers, editors, chat apps -- while keeping your audio and transcriptions on your Mac.
 
+<p align="center">
+  <img src="docs/images/screens.png" alt="Voice 4.0: the home screen in Midnight and Paper, the Customize Your Look screen, and Support Voice" />
+</p>
+
 Built on [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (Parakeet and Whisper speech models) and [llama.cpp](https://github.com/ggml-org/llama.cpp) (local AI cleanup), both compiled into the app. Voice is free and open source, with no accounts, usage limits, or telemetry. Audio and transcripts never leave your Mac. The only network requests are the one-time model downloads from Hugging Face and the "Check for Updates" menu item. Inspired by [Wispr Flow](https://wispr.com).
 
 ---
@@ -35,15 +39,19 @@ That's it. The installer builds and signs the app, installs it to `/Applications
 
 The push-to-talk key is configurable in Settings (fn, Right Option, Left Option, or Right Cmd).
 
-A floating overlay at the top of the screen shows what's happening:
+A floating pill at the top of the screen shows what's happening. Your mic stands in front of it, swells with your voice and lights its lamp while it listens:
+
+<p align="center">
+  <img src="docs/images/overlay.png" width="420" alt="The recording overlay with the vintage, podcast and ribbon mics" />
+</p>
 
 | Indicator | Meaning |
 |-----------|---------|
-| Pulsing red dot | Recording |
-| Pulsing blue dot | Hands-free mode |
-| Hourglass | Transcribing |
-| Checkmark + text preview | Done |
-| X + error message | Something went wrong |
+| Solid accent dot, lamp glowing | Recording (holding the key) |
+| Accent ring | Hands-free mode |
+| ⏳ THINKING... | Transcribing |
+| ✓ + text preview | Done, the mic hops |
+| ✗ + error message | Something went wrong, the mic shakes |
 
 The menu bar icon (a waveform) also reflects the current state. Click it for options including **Paste Last** to re-insert the most recent transcription, and to switch microphones.
 
@@ -62,7 +70,17 @@ Browse this from **Settings... > Transcription**. By default files are stored in
 
 Voice 4.0 shares the design language of Lock Chimes: one tactile 3D hero (a clay microphone you can click and flick-spin), very few colors, big compressed display type, mono spec-sheet labels, press-down buttons, and a synthesized click or clunk on every interaction. The hero is also a control: click it in the main window to start or stop hands-free dictation. While you hold fn, the same mic stands in the overlay pill and swells with your voice.
 
-**Customize Look** (menu bar, or the palette button) switches between four themes, Midnight, Paper, Electric and Hazard, and four microphones: Stage (handheld), Vintage (fifties slot grille on a yoke), Ribbon (ring, spokes, copper body) and Podcast (foam-tipped broadcast mic on a desk stand). The hero, the overlay and the menu bar follow both choices. UI sounds can be turned off there.
+**Customize Look** (menu bar, or the palette button) switches between four themes, Midnight, Paper, Electric and Hazard, and four microphones: Stage (a 3D handheld that follows the theme and spins when you flick it) plus Vintage, Podcast and Ribbon:
+
+<p align="center">
+  <img src="docs/images/mics.png" alt="The Vintage, Podcast and Ribbon microphones" />
+</p>
+
+The hero, the overlay and the menu bar follow both choices. Vintage, Podcast and Ribbon are designed renders (`Resources/Mics/*.png`), so they keep their red and charcoal in every theme. UI sounds can be turned off there.
+
+<p align="center">
+  <img src="docs/images/onboarding.png" width="320" alt="First-launch setup: Hold. Speak. Done." />
+</p>
 
 ## Support Voice
 
