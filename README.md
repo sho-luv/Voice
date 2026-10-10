@@ -187,7 +187,7 @@ To look at a screen without going through the app, the build has a preview mode 
 # -mic stage|vintage|ribbon|podcast picks the hero for the shot
 ```
 
-The app icon is rendered from the same 3D mic: `swiftc -O Design/HeroModel.swift tools/icon/main.swift -o build/render_icon && build/render_icon icon.png`, then `iconutil` (see `tools/icon/main.swift`).
+The app icon is the vintage mic render on a charcoal tile: `swiftc -O Design/HeroModel.swift tools/icon/main.swift -o build/render_icon && build/render_icon icon.png --image Resources/Mics/vintage.png`, then `iconutil` (see `tools/icon/main.swift`).
 
 To check the engine without the UI, run the headless self-test. It loads the installed models, transcribes the given WAV files (16 kHz mono PCM), and runs the AI cleanup test battery:
 
