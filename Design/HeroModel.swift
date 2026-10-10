@@ -37,6 +37,11 @@ enum MicModel {
     static let floorY: CGFloat = -0.72
 
     static func make(style: MicStyle, head: NSColor, stand: NSColor) -> Nodes {
+        // Styles with a designed render in the bundle show that image exactly; the
+        // primitive builds below are the fallback (and what the icon tool uses).
+        if let image = renderImage(for: style) {
+            return makeImageMic(image, lamp: renderLamp[style] ?? CGPoint(x: 0.5, y: 0.5))
+        }
         switch style {
         case .stage: return make(head: head, stand: stand)
         case .vintage: return makeVintage(head: head, stand: stand)
@@ -44,6 +49,76 @@ enum MicModel {
         case .podcast: return makePodcast(head: head, stand: stand)
         }
     }
+
+    // MARK: Designed renders (Resources/Mics/<style>.png, transparent, square)
+
+    /// Where the red lamp dot sits in each render, as fractions of width and height from the top left.
+    static let renderLamp: [MicStyle: CGPoint] = [
+        .vintage: CGPoint(x: 0.465, y: 0.662),
+        .podcast: CGPoint(x: 0.662, y: 0.345),
+        .ribbon: CGPoint(x: 0.479, y: 0.291),
+    ]
+
+    private static var renderCache: [MicStyle: NSImage] = [:]
+
+    static func renderImage(for style: MicStyle) -> NSImage? {
+        if let cached = renderCache[style] { return cached }
+        guard let url = Bundle.main.url(forResource: style.rawValue, withExtension: "png", subdirectory: "Mics"),
+              let image = NSImage(contentsOf: url) else { return nil }
+        renderCache[style] = image
+        return image
+    }
+
+    /// The render on a camera-facing card, standing on the floor, with a glow over its lamp.
+    /// The colours are baked into the image, so themes don't recolour it.
+    static func makeImageMic(_ image: NSImage, lamp: CGPoint) -> Nodes {
+        let root = SCNNode()
+        let size: CGFloat = 2.3
+        let card = SCNPlane(width: size, height: size)
+        let material = SCNMaterial()
+        material.lightingModel = .constant
+        material.diffuse.contents = image
+        material.isDoubleSided = true
+        material.writesToDepthBuffer = false
+        card.materials = [material]
+        let head = SCNNode(geometry: card)
+        head.castsShadow = false
+        // The renders' bases end 8-14% above the image bottom; lift the card so the lowest
+        // one clears the floor plane, which would otherwise clip it.
+        head.position = SCNVector3(0, floorY + size * 0.45, 0)
+        head.constraints = [SCNBillboardConstraint()]
+        root.addChildNode(head)
+
+        // Additive glow: black adds nothing, the accent colour lights the dot up.
+        let lampMaterial = SCNMaterial()
+        lampMaterial.lightingModel = .constant
+        lampMaterial.diffuse.contents = NSColor.black
+        lampMaterial.emission.contents = NSColor.black
+        lampMaterial.transparent.contents = glowTile
+        lampMaterial.blendMode = .add
+        lampMaterial.writesToDepthBuffer = false
+        let glow = SCNPlane(width: size * 0.09, height: size * 0.09)
+        glow.materials = [lampMaterial]
+        let glowNode = SCNNode(geometry: glow)
+        glowNode.position = SCNVector3((lamp.x - 0.5) * size, (0.5 - lamp.y) * size, 0.01)
+        glowNode.renderingOrder = 10
+        head.addChildNode(glowNode)
+
+        // Themes recolour these, but nothing draws with them.
+        return Nodes(root: root, head: head, headMaterial: SCNMaterial(), standMaterial: SCNMaterial(), lampMaterial: lampMaterial)
+    }
+
+    /// Soft round falloff, white in the middle, for the lamp glow's alpha.
+    static let glowTile: CGImage = {
+        let size = 64
+        let context = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: size * 4,
+                                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        let colors = [CGColor(gray: 1, alpha: 1), CGColor(gray: 1, alpha: 0)] as CFArray
+        let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1])!
+        let c = CGPoint(x: size / 2, y: size / 2)
+        context.drawRadialGradient(gradient, startCenter: c, startRadius: 0, endCenter: c, endRadius: CGFloat(size) / 2, options: [])
+        return context.makeImage()!
+    }()
 
     struct Nodes {
         let root: SCNNode

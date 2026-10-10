@@ -75,6 +75,8 @@ mkdir -p "${APP_DIR}/MacOS" "${APP_DIR}/Resources"
 cp "${SCRIPT_DIR}/Voice" "${APP_DIR}/MacOS/Voice"
 cp "${SCRIPT_DIR}/Info.plist" "${APP_DIR}/Info.plist"
 cp "${SCRIPT_DIR}/Voice.icns" "${APP_DIR}/Resources/Voice.icns"
+# Designed mic renders (MicModel.renderImage); styles without one are built from primitives.
+cp -R "${SCRIPT_DIR}/Resources/Mics" "${APP_DIR}/Resources/Mics"
 
 if [[ "${VOICE_BUNDLE_MODELS:-0}" == "1" ]]; then
     # File names must match ModelCatalog in SpeechEngine.swift.
