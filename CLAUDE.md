@@ -29,6 +29,7 @@ Version 4 is the "(Not Boring)" rework of `~/home/projects/mine/voice` (3.4): th
 | `engine/VoiceEngine.{h,cpp}` | C wrapper over whisper.cpp (Whisper + Parakeet) and llama.cpp |
 | `engine/build.sh` | Builds `engine/build/libvoiceengine.a` from pinned whisper.cpp/llama.cpp tags against one shared ggml |
 | `build-app.sh` | Engine, then `swiftc`, then `Voice.app`. Used by `install.sh` and `create-dmg.sh` |
+| `icon.svg`, `render-icon.sh` | The retired 3.x vector icon. Don't run it for 4.0: it overwrites `icon.png`/`Voice.icns`. The 4.0 icon comes from `tools/icon` with `--image Resources/Mics/vintage.png` |
 | `voice.sh` | Optional terminal companion (Homebrew `whisper-cli` + `sox`) |
 | `MODELS.md` | Model benchmarks and selection history. Read it before changing a model or the cleanup prompt |
 
