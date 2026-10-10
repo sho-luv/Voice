@@ -120,7 +120,7 @@ enum MicModel {
         return Nodes(root: root, head: head, headMaterial: headMaterial, standMaterial: standMaterial, lampMaterial: lampMaterial)
     }
 
-    // MARK: Vintage (a fifties "55": tall rounded head, vertical chrome ribs over a coloured mesh)
+    // MARK: Vintage (a fifties "55": tall rounded head, horizontal slats over a coloured mesh)
 
     static func makeVintage(head headColor: NSColor, stand standColor: NSColor) -> Nodes {
         let root = SCNNode()
@@ -156,16 +156,38 @@ enum MicModel {
         domeNode.position = SCNVector3(0, drumHeight / 2, 0)
         head.addChildNode(domeNode)
 
-        // Eleven ribs around the front 160 degrees; the centre one is the split bar.
-        for i in 0..<11 {
-            let angle = (-80.0 + Double(i) * 16.0) * .pi / 180
-            let rib = SCNBox(width: i == 5 ? 0.09 : 0.06, height: drumHeight + 0.02, length: 0.05, chamferRadius: 0.02)
-            rib.materials = [chrome]
-            let ribNode = SCNNode(geometry: rib)
-            ribNode.position = SCNVector3((drumRadius + 0.02) * sin(angle), 0, (drumRadius + 0.02) * cos(angle))
-            ribNode.eulerAngles = SCNVector3(0, angle, 0)
-            head.addChildNode(ribNode)
+        // Horizontal slats wrap the drum and continue up over the dome, like a radiator grille,
+        // with a vertical spine down the centre of the front.
+        let slatPipe: CGFloat = 0.028
+        var slatY: CGFloat = -drumHeight / 2 + 0.1
+        while slatY <= drumHeight / 2 {
+            let slat = SCNTorus(ringRadius: drumRadius + 0.015, pipeRadius: slatPipe)
+            slat.ringSegmentCount = 64
+            slat.materials = [chrome]
+            let slatNode = SCNNode(geometry: slat)
+            slatNode.position = SCNVector3(0, slatY, 0)
+            head.addChildNode(slatNode)
+            slatY += 0.14
         }
+        for h: CGFloat in [0.13, 0.26, 0.37, 0.44] {
+            let r = (drumRadius * drumRadius - h * h).squareRoot() + 0.01
+            let slat = SCNTorus(ringRadius: r, pipeRadius: slatPipe)
+            slat.ringSegmentCount = 64
+            slat.materials = [chrome]
+            let slatNode = SCNNode(geometry: slat)
+            slatNode.position = SCNVector3(0, drumHeight / 2 + h, 0)
+            head.addChildNode(slatNode)
+        }
+        let spine = SCNBox(width: 0.09, height: drumHeight + 0.1, length: 0.06, chamferRadius: 0.025)
+        spine.materials = [chrome]
+        let spineNode = SCNNode(geometry: spine)
+        spineNode.position = SCNVector3(0, 0.05, drumRadius + 0.02)
+        head.addChildNode(spineNode)
+        let spineCap = SCNSphere(radius: 0.05)
+        spineCap.materials = [chrome]
+        let spineCapNode = SCNNode(geometry: spineCap)
+        spineCapNode.position = SCNVector3(0, drumHeight / 2 + 0.12, drumRadius - 0.04)
+        head.addChildNode(spineCapNode)
 
         // Solid band around the bottom of the head.
         let band = SCNCylinder(radius: drumRadius + 0.07, height: 0.2)
