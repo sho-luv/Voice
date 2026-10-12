@@ -91,8 +91,11 @@ save, Accessibility injection, Spanish under Rosetta, 7.2 MB single-arch / 12 MB
    ```
    Then install it and dictate once.
 5. Update the update feed. "Check for Updates" reads `https://faradaysoft.com/appcast.json`
-   (`{"version": "3.3", "url": "<DMG download URL>"}`), which lives in the
-   `sho-luv/faradaysoft.com` repo along with the website's download links.
+   (`{"version": "4.0", "url": "<DMG download URL>", "minimumSystemVersion": "14.0", "notes": "..."}`),
+   which lives in the `sho-luv/faradaysoft.com` repo along with the website's download links.
+   Keep `minimumSystemVersion` equal to `LSMinimumSystemVersion`: from 4.0 on, a Mac below it is
+   told the update needs a newer macOS instead of being offered a DMG it can't open (3.4 and
+   earlier ignore the field).
 
 ## Troubleshooting
 
