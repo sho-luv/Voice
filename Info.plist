@@ -14,8 +14,6 @@
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>4.0</string>
-	<key>CFBundleVersion</key>
-	<string>4.0</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -27,26 +25,28 @@
 			</array>
 		</dict>
 	</array>
+	<key>CFBundleVersion</key>
+	<string>4.0</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<false/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Enfrosec LLC (dba Faraday Soft). Licensed under GPL-3.0-or-later.</string>
-	<key>VoiceSupportLinks</key>
-	<dict>
-		<key>3</key>
-		<string>https://buy.stripe.com/test_7sYaEX1ePfNS3VZ0s1dfG01</string>
-		<key>5</key>
-		<string>https://buy.stripe.com/test_8x228r9Ll7hmbor7UtdfG02</string>
-		<key>10</key>
-		<string>https://buy.stripe.com/test_3cI8wPe1B7hm647eiRdfG03</string>
-		<key>20</key>
-		<string>https://buy.stripe.com/test_eVq00j9LlfNSdwzb6FdfG04</string>
-		<key>custom</key>
-		<string>https://buy.stripe.com/test_eVq00jg9JfNS78bcaJdfG00</string>
-	</dict>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Voice needs microphone access to record speech for transcription.</string>
+	<key>VoiceSupportLinks</key>
+	<dict>
+		<key>10</key>
+		<string>https://buy.stripe.com/8x228r9Ll7hmbor7UtdfG02</string>
+		<key>20</key>
+		<string>https://buy.stripe.com/3cI8wPe1B7hm647eiRdfG03</string>
+		<key>3</key>
+		<string>https://buy.stripe.com/eVq00jg9JfNS78bcaJdfG00</string>
+		<key>5</key>
+		<string>https://buy.stripe.com/7sYaEX1ePfNS3VZ0s1dfG01</string>
+		<key>custom</key>
+		<string>https://buy.stripe.com/eVq00j9LlfNSdwzb6FdfG04</string>
+	</dict>
 </dict>
 </plist>

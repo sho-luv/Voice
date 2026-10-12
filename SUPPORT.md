@@ -21,16 +21,18 @@ brings the person back into the app.
 The link comes from `Info.plist` > `VoiceSupportURL`. Until it contains a `stripe.com`
 URL, the Support screen shows a "payment link not set up yet" pill.
 
-## Current state (2026-10-08)
+## Current state (2026-10-12, live)
 
 | Thing | Value |
 |---|---|
-| Stripe account | `acct_1TF0IGE0h3RZWa8f`, business name still "New business" (rename to Faraday Soft in Settings > Business details) |
-| Product (test mode) | "Support Voice", `prod_VPCJ79RJzd0KKw`, customer chooses price, preset $9, min $3, max $500 |
-| Prices (test mode) | $3, $5, $10, $20 one-off, plus "customer chooses" (preset $9, min $3, max $500) |
-| Payment Links (test mode) | $3 `test_7sYaEX1ePfNS3VZ0s1dfG01`, $5 `test_8x228r9Ll7hmbor7UtdfG02`, $10 `test_3cI8wPe1B7hm647eiRdfG03`, $20 `test_eVq00j9LlfNSdwzb6FdfG04`, custom `test_eVq00jg9JfNS78bcaJdfG00` (all `https://buy.stripe.com/...`) |
-| After payment | Redirect to `https://faradaysoft.com/thanks/?session_id={CHECKOUT_SESSION_ID}` |
-| In the app | `Info.plist` `VoiceSupportLinks` dict (keys 3, 5, 10, 20, custom); swap for the live links before release |
+| Stripe account | `acct_1TF0IGE0h3RZWa8f`, individual (sole proprietor), public name "Faraday Soft", verified |
+| Product (live) | "Support Voice" with $3, $5, $10, $20 one-off prices; the pick-your-own link has its own "Support Voice" customer-chooses price (preset $9) |
+| Payment Links (live) | $3 `eVq00jg9JfNS78bcaJdfG00`, $5 `7sYaEX1ePfNS3VZ0s1dfG01`, $10 `8x228r9Ll7hmbor7UtdfG02`, $20 `3cI8wPe1B7hm647eiRdfG03`, custom `eVq00j9LlfNSdwzb6FdfG04` (all `https://buy.stripe.com/...`) |
+| After payment | Redirect to `https://faradaysoft.com/thanks/?session_id={CHECKOUT_SESSION_ID}`; automatic tax off |
+| In the app | `Info.plist` `VoiceSupportLinks` dict (keys 3, 5, 10, 20, custom) |
+| Verified | A real $5 Apple Pay tip succeeded on 2026-10-12 |
+
+The sandbox ("test mode") copies of the product and links still exist for testing with card 4242.
 
 Sandbox objects do not carry over to live mode. After "Verify your business" activates the
 account, recreate the product and link in live mode (same settings, takes two minutes), put
