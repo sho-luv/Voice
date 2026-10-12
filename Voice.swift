@@ -2381,7 +2381,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
                 let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
 
-                if latestVersion.compare(currentVersion, options: .numeric) == .orderedDescending {
+                // An update that needs a newer macOS than this Mac runs can't be installed, so say so
+                // instead of offering a download that won't open. "minimumSystemVersion" is optional.
+                let isNewer = latestVersion.compare(currentVersion, options: .numeric) == .orderedDescending
+                if isNewer, let minimum = json["minimumSystemVersion"] as? String,
+                   !ProcessInfo.processInfo.isOperatingSystemAtLeast(Self.osVersion(minimum)) {
+                    let os = ProcessInfo.processInfo.operatingSystemVersion
+                    let alert = NSAlert()
+                    alert.messageText = "Voice \(latestVersion) Needs macOS \(minimum)"
+                    alert.informativeText = "This Mac runs macOS \(os.majorVersion).\(os.minorVersion). "
+                        + "Voice \(currentVersion) keeps working; update macOS to get Voice \(latestVersion)."
+                    alert.alertStyle = .informational
+                    alert.runModal()
+                } else if isNewer {
                     let alert = NSAlert()
                     alert.messageText = "Update Available"
                     alert.informativeText = "Voice \(latestVersion) is available. You have \(currentVersion)."
@@ -2403,6 +2415,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 }
             }
         }.resume()
+    }
+
+    /// "14" or "14.2" or "14.2.1" as an OperatingSystemVersion; missing parts are 0.
+    static func osVersion(_ string: String) -> OperatingSystemVersion {
+        let parts = string.split(separator: ".").map { Int($0) ?? 0 } + [0, 0, 0]
+        return OperatingSystemVersion(majorVersion: parts[0], minorVersion: parts[1], patchVersion: parts[2])
     }
 
     @objc func quitApp() {
