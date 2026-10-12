@@ -1814,27 +1814,39 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
     }
 
-    func makeWaveformImage(tint: NSColor? = nil) -> NSImage {
-        let w: CGFloat = 18, h: CGFloat = 18
-        let img = NSImage(size: NSSize(width: w, height: h))
-        img.lockFocus()
-        let barCount = 7
-        let barW: CGFloat = 1.5
-        let gap: CGFloat = 1.0
-        let totalW = CGFloat(barCount) * barW + CGFloat(barCount - 1) * gap
-        let startX = (w - totalW) / 2.0
-        let centerY = h / 2.0
-        let maxH = h * 0.7
-        let heights: [CGFloat] = [0.25, 0.5, 0.75, 1.0, 0.75, 0.5, 0.25]
-        (tint ?? NSColor.black).setFill()
-        for i in 0..<barCount {
-            let bh = maxH * heights[i]
-            let x = startX + CGFloat(i) * (barW + gap)
-            let y = centerY - bh / 2.0
-            NSBezierPath(roundedRect: NSRect(x: x, y: y, width: barW, height: bh),
-                         xRadius: barW / 2, yRadius: barW / 2).fill()
+    /// The menu bar glyph: the vintage mic (slot-grille head in a yoke, on a stand) in one color.
+    /// Drawn with a handler so it is redrawn sharp at the screen's scale; template when idle.
+    func makeMenuBarImage(tint: NSColor? = nil) -> NSImage {
+        let img = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
+            guard let c = NSGraphicsContext.current?.cgContext else { return false }
+            c.setFillColor((tint ?? .black).cgColor)
+            c.setStrokeColor((tint ?? .black).cgColor)
+            // Yoke cradling the head, stem, base.
+            c.setLineWidth(1.3)
+            c.setLineCap(.round)
+            let yoke = CGMutablePath()
+            yoke.move(to: CGPoint(x: 4.3, y: 10.5))
+            yoke.addLine(to: CGPoint(x: 4.3, y: 8))
+            yoke.addArc(center: CGPoint(x: 9, y: 8), radius: 4.7, startAngle: .pi, endAngle: 2 * .pi, clockwise: false)
+            yoke.addLine(to: CGPoint(x: 13.7, y: 10.5))
+            c.addPath(yoke)
+            c.strokePath()
+            c.fill(CGRect(x: 8.3, y: 2.2, width: 1.4, height: 1.4))
+            c.addPath(CGPath(roundedRect: CGRect(x: 5.2, y: 0.9, width: 7.6, height: 1.6),
+                             cornerWidth: 0.8, cornerHeight: 0.8, transform: nil))
+            c.fillPath()
+            // Solid head with three grille slots cut out.
+            c.addPath(CGPath(roundedRect: CGRect(x: 5.6, y: 6.2, width: 6.8, height: 11),
+                             cornerWidth: 3.4, cornerHeight: 3.4, transform: nil))
+            c.fillPath()
+            c.setBlendMode(.clear)
+            for y: CGFloat in [8.6, 11.2, 13.8] {
+                c.addPath(CGPath(roundedRect: CGRect(x: 7.1, y: y, width: 3.8, height: 1.05),
+                                 cornerWidth: 0.52, cornerHeight: 0.52, transform: nil))
+            }
+            c.fillPath()
+            return true
         }
-        img.unlockFocus()
         img.isTemplate = (tint == nil)
         return img
     }
@@ -1846,12 +1858,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         switch appState {
         case .idle:
             button.contentTintColor = nil
-            button.image = makeWaveformImage()
+            button.image = makeMenuBarImage()
         case .recording, .popo:
             // The theme's accent, so the menu bar matches the overlay and the mic's lamp.
-            button.image = makeWaveformImage(tint: ThemeStore.shared.current.nsAccent)
+            button.image = makeMenuBarImage(tint: ThemeStore.shared.current.nsAccent)
         case .processing:
-            button.image = makeWaveformImage(tint: .secondaryLabelColor)
+            button.image = makeMenuBarImage(tint: .secondaryLabelColor)
         }
     }
 
