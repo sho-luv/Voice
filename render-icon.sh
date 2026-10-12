@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# render-icon.sh — Regenerate every raster icon from icon.svg.
+# render-icon.sh — RETIRED 3.x icon (Voice 4.0 uses tools/icon --image Resources/Mics/vintage.png).
+# Running this overwrites the 4.0 icon. Kept for the website favicons only.
+# Regenerate every raster icon from icon.svg.
 #
 # Usage: ./render-icon.sh
 #

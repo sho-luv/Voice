@@ -25,3 +25,6 @@ voice_1600x1200_*
 
 # Website lives in its own repo (sho-luv/faradaysoft.com)
 website/
+
+# Icon renderer and iconset scratch
+build/
