@@ -115,7 +115,7 @@ Open from the menu bar (click the waveform icon > "Settings...") or press **Cmd+
 |---------|-------------|---------|
 | Local AI text cleanup | Enable/disable AI post-processing of transcriptions | On |
 | Custom instructions | Optional rewrite guardrails appended to the cleanup prompt | Blank |
-| Custom vocabulary | Names, acronyms, and technical terms. Their spelling is restored in every transcript; the Whisper model also uses them to bias recognition | Blank |
+| Custom vocabulary | Names, acronyms, and technical terms. Their spelling is restored in every transcript; the Whisper model also uses them to bias recognition. `heard = written` fixes a mis-hearing (`cooper netties = Kubernetes`) for both models | Blank |
 
 ### History
 

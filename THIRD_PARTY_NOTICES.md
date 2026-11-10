@@ -45,3 +45,9 @@ Models are not included in the app or this repository. Voice downloads them from
 | Parakeet TDT 0.6B v3 (GGUF conversion) | [nvidia/parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3), converted by [ggml-org/parakeet-GGUF](https://huggingface.co/ggml-org/parakeet-GGUF) | [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/) (model weights, © NVIDIA) |
 | Whisper large-v3-turbo (GGML Q5_0) | [openai/whisper-large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo), converted by [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp) | MIT |
 | Qwen2.5-1.5B-Instruct (GGUF Q4_0) | [Qwen/Qwen2.5-1.5B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF) | Apache-2.0 |
+
+One small model ships inside the app, because every recording goes through it:
+
+| Model | Source | License |
+|-------|--------|---------|
+| Silero VAD v6.2.0 (GGML) | [snakers4/silero-vad](https://github.com/snakers4/silero-vad), converted by [ggml-org/whisper-vad](https://huggingface.co/ggml-org/whisper-vad) | MIT |

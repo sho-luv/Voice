@@ -33,6 +33,8 @@ fi
 SWIFT_SOURCES=(
     "${SCRIPT_DIR}/Voice.swift"
     "${SCRIPT_DIR}/SpeechEngine.swift"
+    "${SCRIPT_DIR}/AudioCapture.swift"
+    "${SCRIPT_DIR}/AudioPrep.swift"
     "${SCRIPT_DIR}/ModelDownload.swift"
     "${SCRIPT_DIR}"/Design/*.swift
     "${SCRIPT_DIR}"/Views/*.swift
@@ -77,6 +79,16 @@ cp "${SCRIPT_DIR}/Info.plist" "${APP_DIR}/Info.plist"
 cp "${SCRIPT_DIR}/Voice.icns" "${APP_DIR}/Resources/Voice.icns"
 # Designed mic renders (MicModel.renderImage); styles without one are built from primitives.
 cp -R "${SCRIPT_DIR}/Resources/Mics" "${APP_DIR}/Resources/Mics"
+# Voice activity model (Silero v6.2.0, MIT), from
+# https://huggingface.co/ggml-org/whisper-vad at 9ffd54a1e1ee413ddf265af9913beaf518d1639b.
+VAD_MODEL="${SCRIPT_DIR}/Resources/Models/ggml-silero-v6.2.0.bin"
+VAD_SHA256="2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987"
+if [[ "$(shasum -a 256 "${VAD_MODEL}" | cut -d' ' -f1)" != "${VAD_SHA256}" ]]; then
+    echo "Error: ${VAD_MODEL} is missing or does not match its checksum" >&2
+    exit 1
+fi
+mkdir -p "${APP_DIR}/Resources/Models"
+cp "${VAD_MODEL}" "${APP_DIR}/Resources/Models/"
 
 if [[ "${VOICE_BUNDLE_MODELS:-0}" == "1" ]]; then
     # File names must match ModelCatalog in SpeechEngine.swift.

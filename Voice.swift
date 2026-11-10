@@ -402,6 +402,34 @@ func listInputDevices() -> [AudioDevice] {
     return inputDevices
 }
 
+/// UID of the system's default input device, or nil if there is none.
+func defaultInputDeviceUID() -> String? {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultInputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var id = AudioDeviceID(0)
+    var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id) == noErr else { return nil }
+    return listInputDevices().first { $0.deviceID == id }?.uid
+}
+
+/// The Mac's own microphone, if it has one (laptops, iMacs, Studio Display is not built-in).
+func builtInMicrophone() -> AudioDevice? {
+    listInputDevices().first { device in
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var transport: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(device.deviceID, &addr, 0, nil, &size, &transport) == noErr else { return false }
+        return transport == kAudioDeviceTransportTypeBuiltIn
+    }
+}
+
 // MARK: - App Context
 
 struct AppContext {
@@ -453,7 +481,7 @@ struct AppContext {
 
 func cleanupSystemPrompt(appContext: AppContext) -> String {
     let custom = Settings.shared.aiCustomPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-    let vocab = Settings.shared.customVocabulary.trimmingCharacters(in: .whitespacesAndNewlines)
+    let vocab = TextCleanup.vocabularyTerms(Settings.shared.customVocabulary)
     var customLine = custom.isEmpty ? "" : "\n    Additional instructions: \(custom)"
     if !vocab.isEmpty {
         customLine += "\n    Spell these terms exactly as written: \(String(vocab.prefix(300)))"
@@ -1354,10 +1382,10 @@ func writeWAVHeader(to handle: FileHandle, dataSize: UInt32) {
     handle.write(header)
 }
 
-// Peak-normalize a 16kHz mono Int16 PCM WAV file in place.
-// Raises quiet / mumbled speech to a consistent level before handing it to
-// Whisper, which performs dramatically better on normalized input.
-// Returns true on success; false leaves the file untouched.
+// Peak-normalize a 16kHz mono Int16 PCM WAV file in place. This was the app's only
+// audio preparation through 4.0.2. `Voice --bench` measured it as no change for either
+// model, and AudioPrep replaced it; it stays only so `--bench --prep old` can reproduce
+// the old numbers. Returns true on success; false leaves the file untouched.
 @discardableResult
 func normalizeWavFile(at path: String) -> Bool {
     guard var data = try? Data(contentsOf: URL(fileURLWithPath: path)),
@@ -1425,7 +1453,7 @@ func whisperContextPrompt(from context: AppContext) -> String {
         let clipped = title.count > 120 ? String(title.prefix(120)) : title
         parts.append("Window: \(clipped).")
     }
-    let vocab = Settings.shared.customVocabulary.trimmingCharacters(in: .whitespacesAndNewlines)
+    let vocab = TextCleanup.vocabularyTerms(Settings.shared.customVocabulary)
     if !vocab.isEmpty {
         let clipped = vocab.count > 300 ? String(vocab.prefix(300)) : vocab
         parts.append("Vocabulary: \(clipped).")
@@ -1438,13 +1466,15 @@ func whisperContextPrompt(from context: AppContext) -> String {
 class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     var appState: AppState = .idle
-    var audioEngine: AVAudioEngine?
+    var audioCapture: AudioCapture?          // running capture, main thread only
+    private var pendingCapture: AudioCapture? // capture that is still starting
     var isRestartingEngine = false
     var audioFileHandle: FileHandle?
     var audioDataSize: UInt32 = 0
     var currentAudioLevel: Float = 0.0  // Exposed for waveform overlay
     var zeroBufferCount: Int = 0
     var zeroSignalWarningShown: Bool = false
+    var silentMicFallbackTried = false
     var audioFile: String?
     var previousApp: NSRunningApplication?  // saved before recording to refocus for paste
 
@@ -1727,9 +1757,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             switch self.appState {
             case .recording, .popo:
                 NSLog("Voice: restarting engine during active capture due to device change")
-                self.audioEngine?.inputNode.removeTap(onBus: 0)
-                self.audioEngine?.stop()
-                self.audioEngine = nil
+                self.audioCapture?.stop(completion: nil)
+                self.audioCapture = nil
                 // Small delay for the new device to settle
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     switch self.appState {
@@ -1953,21 +1982,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         zeroBufferCount = 0
         zeroSignalWarningShown = false
+        silentMicFallbackTried = false
 
         // Save the currently focused app so we can refocus it before pasting
         previousApp = NSWorkspace.shared.frontmostApplication
         // Load models while the user talks, so they're warm at release.
         SpeechEngine.shared.prepare(speech: Settings.shared.speechModel, cleanup: Settings.shared.aiEnabled)
 
-        // Show feedback immediately — before engine start
         appState = popo ? .popo : .recording
         inputMonitor.setRecording(true)
         if popo { inputMonitor.setPopo(true) }
-        updateIcon()
-        showOverlay(state: popo ? .popo : .recording)
-        if Settings.shared.soundsEnabled { playSound(popo ? "Morse" : "Tink") }
 
-        // WAV with a 44-byte placeholder header, finalized in endCapture
+        // The microphone is asked to start before anything is drawn or played: it takes
+        // the longest to come up, and every millisecond it is late is a clipped first word.
+        // WAV with a 44-byte placeholder header, finalized in endCapture.
         let tempFile = NSTemporaryDirectory() + "voice_\(ProcessInfo.processInfo.globallyUniqueString).wav"
         audioFile = tempFile
         FileManager.default.createFile(atPath: tempFile, contents: Data(count: 44))
@@ -1979,10 +2007,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         audioFileHandle = handle
         audioDataSize = 0
 
-        if let error = startCaptureEngine() {
-            abortCapture(error)
-            return
-        }
+        startCaptureEngine()
+
+        updateIcon()
+        showOverlay(state: popo ? .popo : .recording)
+        if Settings.shared.soundsEnabled { playSound(popo ? "Morse" : "Tink") }
 
         if popo {
             popoTimer = Timer.scheduledTimer(withTimeInterval: Settings.shared.popoTimeoutSeconds, repeats: false) { [weak self] _ in
@@ -1993,6 +2022,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
 
     private func abortCapture(_ message: String) {
+        pendingCapture = nil
+        audioCapture?.stop(completion: nil)
+        audioCapture = nil
         audioFileHandle?.closeFile()
         audioFileHandle = nil
         if let file = audioFile { cleanup(file) }
@@ -2011,156 +2043,166 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         inputMonitor.setRecording(false)
         inputMonitor.setPopo(false)
 
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine?.stop()
-        // Delay dealloc — AVAudioIOUnit dispatch queue may have in-flight callbacks
-        let engineRef = audioEngine
-        audioEngine = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { _ = engineRef }
+        let capture = audioCapture
+        audioCapture = nil
+        pendingCapture = nil
 
-        if transcribe, let handle = audioFileHandle {
-            writeWAVHeader(to: handle, dataSize: audioDataSize)
-        }
-        audioFileHandle?.closeFile()
-        audioFileHandle = nil
-        if Settings.shared.soundsEnabled { playSound(sound) }
+        // The WAV is finalized only after the queue has delivered its last buffer (or the
+        // stop watchdog gave up), so a buffer in flight can't land after the header is written.
+        let finish: () -> Void = { [self] in
+            if transcribe, let handle = audioFileHandle {
+                writeWAVHeader(to: handle, dataSize: audioDataSize)
+            }
+            audioFileHandle?.closeFile()
+            audioFileHandle = nil
+            if Settings.shared.soundsEnabled { playSound(sound) }
 
-        guard transcribe else {
-            if let file = audioFile { cleanup(file) }
-            audioFile = nil
-            appState = .idle
+            guard transcribe else {
+                if let file = audioFile { cleanup(file) }
+                audioFile = nil
+                appState = .idle
+                updateIcon()
+                hideOverlay()
+                return
+            }
+
+            appState = .processing
             updateIcon()
-            hideOverlay()
+            showOverlay(state: .transcribing)
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.transcribeAndProcess()
+            }
+        }
+        guard let capture = capture else {
+            finish()
             return
         }
-
-        appState = .processing
-        updateIcon()
-        showOverlay(state: .transcribing)
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.transcribeAndProcess()
+        // People let go of the key on the last syllable, not after it. Keep listening for
+        // a moment so the end of the final word is recorded; a cancelled capture stops
+        // at once. The recognizer answers in tens of milliseconds, so the wait isn't felt.
+        if transcribe {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.releaseTail) {
+                capture.stop(completion: finish)
+            }
+        } else {
+            capture.stop(completion: finish)
         }
     }
 
-    // Re-create the engine mid-capture after a device change (Bluetooth reconnect).
+    /// How long capture continues after the key is released.
+    private static let releaseTail: TimeInterval = 0.25
+
+    // Re-create the capture mid-session after a device change (Bluetooth reconnect).
     // Keeps appending to the same WAV file.
     func restartRecordingEngine() {
         isRestartingEngine = true
-        defer { DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.isRestartingEngine = false } }
-        if let error = startCaptureEngine() {
-            NSLog("Voice: engine restart after device change failed: %@", error)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.isRestartingEngine = false }
+        startCaptureEngine()
+    }
+
+    // Starts microphone capture on the selected mic (system default if none, or if it has
+    // disappeared), appending 16 kHz mono Int16 to audioFileHandle. Everything that touches
+    // CoreAudio runs off the main thread with a watchdog: a failure or a timeout aborts the
+    // capture with a notification instead of freezing the hotkey. See AudioCapture.swift.
+    private func startCaptureEngine(deviceUID: String? = nil) {
+        let mic = deviceUID ?? Settings.shared.micDeviceUID
+        let capture = AudioCapture(deviceUID: mic)
+        pendingCapture = capture
+        capture.start(onBuffer: { [weak self] samples, frameCount in
+            self?.handleCapturedAudio(samples, frameCount: frameCount)
+        }, completion: { [weak self] error in
+            guard let self = self else { return }
+            var stillWanted = false
+            switch self.appState {
+            case .recording, .popo: stillWanted = (self.pendingCapture === capture)
+            default: break
+            }
+            if let error = error {
+                NSLog("Voice: capture start failed: %@", error)
+                if stillWanted {
+                    self.pendingCapture = nil
+                    self.abortCapture(error)
+                }
+                return
+            }
+            // The user may have released the key while the mic was still waking up.
+            guard stillWanted else {
+                capture.stop(completion: nil)
+                return
+            }
+            self.pendingCapture = nil
+            self.audioCapture = capture
+            NSLog("Voice: capture started on %@", mic.isEmpty ? "system default mic" : mic)
+        })
+    }
+
+    // Runs on the capture queue. File writes stay here, as the old tap did; UI hops to main.
+    private func handleCapturedAudio(_ samples: UnsafePointer<Int16>, frameCount: Int) {
+        audioFileHandle?.write(Data(bytes: UnsafeRawPointer(samples), count: frameCount * 2))
+        audioDataSize += UInt32(frameCount * 2)
+
+        // RMS level for the waveform overlay
+        var sum: Float = 0
+        for i in 0..<frameCount {
+            let sample = Float(samples[i]) / 32768.0
+            sum += sample * sample
+        }
+        let rms = sqrt(sum / Float(max(frameCount, 1)))
+        DispatchQueue.main.async {
+            self.currentAudioLevel = rms
+            // Zero-signal detection (a Bluetooth mic that never woke up, or a muted input)
+            guard rms < 0.0001 else {
+                self.zeroBufferCount = 0
+                return
+            }
+            self.zeroBufferCount += 1
+            // ~2 seconds of silence at 100 ms per buffer. AirPods send about a second of
+            // silence while their voice link comes up, so the threshold must clear that.
+            guard self.zeroBufferCount > 20 else { return }
+            switch self.appState {
+            case .recording, .popo: break
+            default: return
+            }
+            // A mic that sends nothing but zeros (a Bluetooth headset whose voice link
+            // never came up, as the AirPods Max did on 2026-10-28) will stay that way.
+            // Move to the Mac's own microphone once instead of recording silence.
+            if !self.silentMicFallbackTried {
+                self.silentMicFallbackTried = true
+                if let fallback = self.silentMicFallback() {
+                    NSLog("Voice: mic is silent, switching to %@", fallback.name)
+                    self.zeroBufferCount = 0
+                    self.audioCapture?.stop(completion: nil)
+                    self.audioCapture = nil
+                    self.startCaptureEngine(deviceUID: fallback.uid)
+                    self.showCaptureNotice("Mic was silent \u{2014} now using \(fallback.name)", seconds: 2.5)
+                    return
+                }
+            }
+            guard !self.zeroSignalWarningShown else { return }
+            self.zeroSignalWarningShown = true
+            self.showCaptureNotice("No audio detected \u{2014} check your microphone", seconds: 3.0)
         }
     }
 
-    // Starts an AVAudioEngine on the selected mic, converting input to 16 kHz
-    // mono Int16 appended to audioFileHandle. Returns an error message on failure.
-    private func startCaptureEngine() -> String? {
-        var engine = AVAudioEngine()
-        var inputNode = engine.inputNode
+    /// The built-in microphone, unless that is the one already in use.
+    private func silentMicFallback() -> AudioDevice? {
+        guard let builtIn = builtInMicrophone() else { return nil }
+        let chosen = Settings.shared.micDeviceUID
+        let chosenIsPresent = !chosen.isEmpty && listInputDevices().contains { $0.uid == chosen }
+        let inUse = chosenIsPresent ? chosen : (defaultInputDeviceUID() ?? "")
+        return builtIn.uid == inUse ? nil : builtIn
+    }
 
-        // Set selected microphone via CoreAudio; a mic that has disappeared
-        // falls back to the system default silently.
-        let selectedUID = Settings.shared.micDeviceUID
-        if !selectedUID.isEmpty {
-            if let device = listInputDevices().first(where: { $0.uid == selectedUID }) {
-                var deviceID = device.deviceID
-                let status = AudioUnitSetProperty(
-                    inputNode.audioUnit!,
-                    kAudioOutputUnitProperty_CurrentDevice,
-                    kAudioUnitScope_Global,
-                    0,
-                    &deviceID,
-                    UInt32(MemoryLayout<AudioDeviceID>.size)
-                )
-                if status != noErr {
-                    NSLog("Voice: Failed to set mic device %@ (status %d), using default", selectedUID, status)
-                }
-            } else {
-                NSLog("Voice: Preferred mic %@ not found, using system default", selectedUID)
+    /// Shows a message in the overlay while capture continues, then the capture overlay again.
+    private func showCaptureNotice(_ message: String, seconds: TimeInterval) {
+        showOverlay(state: .error(message))
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+            switch self.appState {
+            case .recording: self.showOverlay(state: .recording)
+            case .popo: self.showOverlay(state: .popo)
+            default: break
             }
         }
-
-        var hwFormat = inputNode.outputFormat(forBus: 0)
-        // If format is invalid (0 channels / 0 sample rate), the device selection failed silently.
-        // Reset to system default and retry with a fresh engine.
-        if hwFormat.channelCount == 0 || hwFormat.sampleRate == 0 {
-            NSLog("Voice: invalid hwFormat — resetting mic to system default")
-            Settings.shared.micDeviceUID = ""
-            engine = AVAudioEngine()
-            inputNode = engine.inputNode
-            hwFormat = inputNode.outputFormat(forBus: 0)
-        }
-        guard hwFormat.channelCount > 0, hwFormat.sampleRate > 0 else {
-            return "No valid microphone found"
-        }
-
-        guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: true),
-              let converter = AVAudioConverter(from: hwFormat, to: targetFormat) else {
-            NSLog("Voice: converter creation failed — hwFormat=%@", hwFormat.description)
-            return "Failed to create audio converter"
-        }
-
-        let tapBlock: AVAudioNodeTapBlock = { [weak self] buffer, _ in
-            guard let self = self else { return }
-            let capacity = AVAudioFrameCount(Double(buffer.frameLength) * 16000.0 / hwFormat.sampleRate)
-            guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: max(capacity, 1)) else { return }
-            var error: NSError?
-            converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
-                outStatus.pointee = .haveData
-                return buffer
-            }
-            guard error == nil, let channelData = convertedBuffer.int16ChannelData else { return }
-            let frameCount = Int(convertedBuffer.frameLength)
-            self.audioFileHandle?.write(Data(bytes: channelData[0], count: frameCount * 2))
-            self.audioDataSize += UInt32(frameCount * 2)
-
-            // RMS level for the waveform overlay
-            var sum: Float = 0
-            for i in 0..<frameCount {
-                let sample = Float(channelData[0][i]) / 32768.0
-                sum += sample * sample
-            }
-            let rms = sqrt(sum / Float(max(frameCount, 1)))
-            DispatchQueue.main.async {
-                self.currentAudioLevel = rms
-                // Zero-signal detection (AirPods/Bluetooth mics that deliver silence)
-                guard rms < 0.0001 else {
-                    self.zeroBufferCount = 0
-                    return
-                }
-                self.zeroBufferCount += 1
-                // ~2 seconds of silence at 16kHz with 4096 buffer = ~8 buffers
-                guard self.zeroBufferCount > 8, !self.zeroSignalWarningShown else { return }
-                self.zeroSignalWarningShown = true
-                self.showOverlay(state: .error("No audio detected \u{2014} check your microphone"))
-                // Return to the capture overlay after 3 seconds
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                    switch self.appState {
-                    case .recording: self.showOverlay(state: .recording)
-                    case .popo: self.showOverlay(state: .popo)
-                    default: break
-                    }
-                }
-            }
-        }
-        // installTap can raise ObjC exceptions on mic disconnect / format
-        // mismatch — catch them instead of crashing with SIGABRT.
-        let tapOK = VoiceExceptionCatcher.run {
-            inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat, block: tapBlock)
-        }
-        guard tapOK else { return "Microphone unavailable — try again" }
-
-        engine.prepare()
-        do {
-            try engine.start()
-        } catch {
-            inputNode.removeTap(onBus: 0)
-            NSLog("Voice: engine.start() FAILED: %@", error.localizedDescription)
-            return "Failed to start recording: \(error.localizedDescription)"
-        }
-        audioEngine = engine
-        NSLog("Voice: engine started — sampleRate=%.0f channels=%d", hwFormat.sampleRate, hwFormat.channelCount)
-        return nil
     }
 
     // MARK: - Transcription & Processing
@@ -2183,10 +2225,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // and the downstream LLM cleanup pass.
         let appContext = AppContext.current()
 
-        // Peak-normalize the WAV so quiet/mumbled speech is brought up to a
-        // consistent level before the speech model sees it. This is the single
-        // biggest quality win for low-volume input and costs ~10ms.
-        normalizeWavFile(at: audioFile)
         let samples = loadPCM16Wav(at: audioFile)
         // Audio is in memory now — don't leave the recording on disk.
         cleanup(audioFile)
@@ -2207,7 +2245,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // Only Whisper can use a biasing prompt; Parakeet has no prompt input.
         let prompt = model.asrKind == VE_ASR_WHISPER ? whisperContextPrompt(from: appContext) : ""
         let language = Settings.shared.transcriptionLanguage
-        guard var rawText = SpeechEngine.shared.transcribe(samples, model: model, prompt: prompt, language: language) else {
+        // Finds the speech, drops the silence and cuts long recordings at pauses before
+        // the recognizer sees any of it (AudioPrep). A recording with no speech in it
+        // stops here: Whisper would otherwise type "Thank you." for a stray key press.
+        var rawText: String
+        switch SpeechEngine.shared.transcribeRecording(samples, model: model, prompt: prompt, language: language) {
+        case .text(let text):
+            rawText = text
+        case .noSpeech:
+            finishProcessing(error: "No speech detected")
+            return
+        case .failed:
             finishProcessing(error: "Transcription failed")
             return
         }
@@ -2442,9 +2490,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
         popoTimer?.invalidate()
         inputMonitor.stop()
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine?.stop()
-        audioEngine = nil
+        audioCapture?.stop(completion: nil)
+        audioCapture = nil
         audioFileHandle?.closeFile()
         audioFileHandle = nil
         if let file = audioFile {
@@ -2464,6 +2511,9 @@ enum VoiceMain {
     private static var appDelegate: AppDelegate?
 
     static func main() {
+        if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "--bench" {
+            exit(Bench.run(Array(CommandLine.arguments.dropFirst(2))))
+        }
         if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "--selftest" {
             exit(SelfTest.run(Array(CommandLine.arguments.dropFirst(2))))
         }

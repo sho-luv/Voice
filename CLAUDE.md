@@ -10,6 +10,7 @@ Version 4 is the "(Not Boring)" rework of `~/home/projects/mine/voice` (3.4): th
 - **Privacy.** Audio and transcripts never leave the Mac. The only network access is SHA-256-verified model downloads from Hugging Face and the user-initiated update check. Don't add analytics or remote AI.
 - **Self-contained.** The app bundle is one statically linked executable. No helper binaries, dylibs or Homebrew at runtime.
 - **Platform.** macOS 14+ (SwiftUI `onChange`, `.menuStyle(.button)`), universal (Apple Silicon + Intel). Apple Silicon uses Metal; the Intel slice runs on CPU (AVX2). `VOICE_UNIVERSAL=1` builds both arches (releases); dev builds default to the host arch.
+- **Measure, don't guess.** Capture, audio preparation and decoding changes go through `Voice --bench` before and after; the results table lives in `MODELS.md`.
 - **Languages.** Both ASR models are multilingual (Parakeet TDT v3 auto-detects; Whisper takes a language code or "auto"). The `transcriptionLanguage` setting steers Whisper and gates the English-only text cleanup — `polishTranscript` only runs the hesitation/LLM cleanup for English or Automatic.
 - **License.** Keep SPDX headers on new source files. Credit new dependencies or models in `THIRD_PARTY_NOTICES.md`.
 - **No paywall.** "Support Voice" is a pay-what-you-want Stripe Payment Link with an honor-system badge (`SUPPORT.md`). Nothing is gated; don't add license checks.
@@ -20,6 +21,8 @@ Version 4 is the "(Not Boring)" rework of `~/home/projects/mine/voice` (3.4): th
 | Path | What |
 |------|------|
 | `Voice.swift` | App core: settings, hotkey event tap, audio capture, overlay (with the 3D mic), text injection, menu bar, URL handler, preview mode, `@main` entry |
+| `AudioCapture.swift` | Microphone capture on AudioQueue (16 kHz mono Int16), every CoreAudio call off the main thread with start/stop watchdogs |
+| `AudioPrep.swift` | `AudioPrep` (speech detection results → trimmed, level-set pieces of at most 28 s) and `Bench` (`Voice --bench`) |
 | `ModelDownload.swift` | SHA-256-verified model downloads, publishing progress to `DownloadView` |
 | `Design/` | The design system ported from iOS: `Theme` + components, `Feedback` (synth sounds, trackpad haptics), `HeroModel` (`MicStyle`: stage, vintage, ribbon, podcast, built from primitives), `HeroSceneView` (`MicController`, `MicSceneView`) |
 | `Views/` | SwiftUI screens: `HomeView` (hero + settings panels), `OnboardingView`, `LookView`, `SupportView`, `DownloadView`, `Windows` (`AppWindows`, `AppModel`, `ThemedRoot`) |
@@ -31,6 +34,8 @@ Version 4 is the "(Not Boring)" rework of `~/home/projects/mine/voice` (3.4): th
 | `build-app.sh` | Engine, then `swiftc`, then `Voice.app`. Used by `install.sh` and `create-dmg.sh` |
 | `icon.svg`, `render-icon.sh` | The retired 3.x vector icon. Don't run it for 4.0: it overwrites `icon.png`/`Voice.icns`. The 4.0 icon comes from `tools/icon` with `--image Resources/Mics/vintage.png` |
 | `voice.sh` | Optional terminal companion (Homebrew `whisper-cli` + `sox`) |
+| `tools/bench/` | `make-sets.py` builds faulty copies of a clean test set, `run.sh` + `wer.py` score `Voice --bench` output. Use it before and after any change to capture, preparation or decoding |
+| `Resources/Models/` | The bundled voice activity model (Silero, 0.9 MB); `build-app.sh` checks its SHA-256 |
 | `MODELS.md` | Model benchmarks and selection history. Read it before changing a model or the cleanup prompt |
 
 ## Build and verify
@@ -39,6 +44,7 @@ Version 4 is the "(Not Boring)" rework of `~/home/projects/mine/voice` (3.4): th
 ./build-app.sh                                     # engine (cached) + app bundle
 ./install.sh                                       # build, sign, install to /Applications
 ./Voice.app/Contents/MacOS/Voice --selftest a.wav  # headless: transcribe + cleanup battery
+tools/bench/run.sh <bench-dir> <label>             # word error rate per test set (see MODELS.md, Audio preparation)
 ./Voice.app/Contents/MacOS/Voice -screen home -tab ai -theme hazard -shot x.png   # screenshot QA (see README)
 ```
 
@@ -52,8 +58,8 @@ Accessibility permission is tied to the code signature. Sign with a stable ident
 ## Pipeline
 
 1. `InputMonitor` (CGEventTap) detects hold, double-tap (hands-free, `.popo`) and Escape.
-2. `beginCapture` records 16 kHz mono Int16 to a temp WAV via `AVAudioEngine`, and calls `SpeechEngine.prepare` so the models load while the user talks.
-3. `endCapture` finalizes the WAV. `transcribeAndProcess` normalizes it, loads the samples and deletes the file, then calls `SpeechEngine.transcribe`.
+2. `beginCapture` starts `AudioCapture` (AudioQueue, 16 kHz mono Int16 into a temp WAV) before any UI, and calls `SpeechEngine.prepare` so the models load while the user talks. A mic that sends only zeros for 2 s is swapped for the built-in one.
+3. `endCapture` keeps capturing for 250 ms after release, then finalizes the WAV. `transcribeAndProcess` loads the samples, deletes the file and calls `SpeechEngine.transcribeRecording`: voice activity detection, "No speech detected" if there is none, trim, cut at pauses into pieces of at most 28 s, transcribe each (`AudioPrep`).
 4. `polishTranscript` removes hesitations deterministically, runs the LLM only if `TextCleanup.needsModel`, and keeps the output only if `TextCleanup.acceptModelOutput` passes.
 5. `TextInjector` inserts through the Accessibility API, or pastes via the clipboard in terminals.
 

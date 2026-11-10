@@ -20,6 +20,7 @@ extern "C" {
 
 typedef struct ve_asr ve_asr;
 typedef struct ve_llm ve_llm;
+typedef struct ve_vad ve_vad;
 
 typedef enum {
     VE_ASR_WHISPER  = 0,
@@ -38,6 +39,17 @@ ve_asr * ve_asr_load(const char * model_path, ve_asr_kind kind);
 char *   ve_asr_transcribe(ve_asr * asr, const float * pcm, int n_samples,
                            const char * prompt, const char * language, int n_threads);
 void     ve_asr_free(ve_asr * asr);
+
+// Voice activity detection (Silero, CPU). Finds where the speech is, so silence
+// never reaches the recognizer and long recordings can be cut at pauses.
+ve_vad * ve_vad_load(const char * model_path, int n_threads);
+// Writes up to max_segments [start, end) pairs, in samples, into `out`
+// (2 ints per segment) and returns how many were found, or -1 on failure.
+// No stretch of speech is longer than max_speech_s: longer ones are split at
+// their quietest point.
+int      ve_vad_segments(ve_vad * vad, const float * pcm, int n_samples,
+                         float max_speech_s, int * out, int max_segments);
+void     ve_vad_free(ve_vad * vad);
 
 ve_llm * ve_llm_load(const char * model_path, int n_ctx);
 // Applies the model's built-in chat template to [system, user] and decodes

@@ -36,6 +36,10 @@ struct ve_llm {
     std::string tmpl;
 };
 
+struct ve_vad {
+    whisper_vad_context * ctx = nullptr;
+};
+
 static bool g_verbose = false;
 
 static void ve_log(enum ggml_log_level level, const char * text, void *) {
@@ -139,6 +143,56 @@ void ve_asr_free(ve_asr * asr) {
     if (asr->wctx) whisper_free(asr->wctx);
     if (asr->pctx) parakeet_free(asr->pctx);
     delete asr;
+}
+
+// MARK: - Voice activity detection
+
+ve_vad * ve_vad_load(const char * model_path, int n_threads) {
+    whisper_vad_context_params cparams = whisper_vad_default_context_params();
+    cparams.n_threads = n_threads;
+    // The model is under 1 MB: the CPU runs it far faster than real time, and
+    // staying off Metal keeps it independent of the recognizer's GPU state.
+    cparams.use_gpu   = false;
+    whisper_vad_context * ctx = whisper_vad_init_from_file_with_params(model_path, cparams);
+    if (!ctx) return nullptr;
+    auto * vad = new ve_vad();
+    vad->ctx = ctx;
+    return vad;
+}
+
+int ve_vad_segments(ve_vad * vad, const float * pcm, int n_samples,
+                    float max_speech_s, int * out, int max_segments) {
+    if (!vad || !pcm || n_samples <= 0 || !out || max_segments <= 0) return -1;
+    whisper_vad_params params = whisper_vad_default_params();
+    // Short words ("yes", "no") must count as speech, and a breath between
+    // words must not split a sentence. Padding is added by the caller.
+    params.min_speech_duration_ms  = 100;
+    params.min_silence_duration_ms = 200;
+    params.speech_pad_ms           = 0;
+    params.max_speech_duration_s   = max_speech_s;
+    whisper_vad_segments * segs = whisper_vad_segments_from_samples(vad->ctx, params, pcm, n_samples);
+    if (!segs) return -1;
+    const int n = whisper_vad_segments_n_segments(segs);
+    int count = 0;
+    for (int i = 0; i < n && count < max_segments; ++i) {
+        // Segment times are in centiseconds; 16 kHz audio has 160 samples in each.
+        int start = (int) (whisper_vad_segments_get_segment_t0(segs, i) * 160.0f);
+        int end   = (int) (whisper_vad_segments_get_segment_t1(segs, i) * 160.0f);
+        if (start < 0) start = 0;
+        if (end > n_samples) end = n_samples;
+        if (end <= start) continue;
+        out[2 * count]     = start;
+        out[2 * count + 1] = end;
+        ++count;
+    }
+    whisper_vad_free_segments(segs);
+    return count;
+}
+
+void ve_vad_free(ve_vad * vad) {
+    if (!vad) return;
+    if (vad->ctx) whisper_vad_free(vad->ctx);
+    delete vad;
 }
 
 // MARK: - Text cleanup LLM

@@ -30,7 +30,7 @@ jobs:
           swiftc -module-cache-path /tmp/voice-module-cache \
             -parse-as-library \
             -target arm64-apple-macos14.0 \
-            -typecheck Voice.swift SpeechEngine.swift ModelDownload.swift Design/*.swift Views/*.swift Support/*.swift \
+            -typecheck Voice.swift SpeechEngine.swift AudioCapture.swift AudioPrep.swift ModelDownload.swift Design/*.swift Views/*.swift Support/*.swift \
             -import-objc-header Voice-Bridging-Header.h \
             -I engine \
             -framework Cocoa \
