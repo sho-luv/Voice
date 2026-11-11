@@ -29,11 +29,14 @@ jobs:
           mkdir -p /tmp/voice-module-cache
           swiftc -module-cache-path /tmp/voice-module-cache \
             -parse-as-library \
-            -typecheck Voice.swift SpeechEngine.swift \
+            -target arm64-apple-macos14.0 \
+            -typecheck Voice.swift SpeechEngine.swift ModelDownload.swift Design/*.swift Views/*.swift Support/*.swift \
             -import-objc-header Voice-Bridging-Header.h \
             -I engine \
             -framework Cocoa \
             -framework ApplicationServices \
             -framework UserNotifications \
             -framework AVFoundation \
-            -framework CoreAudio
+            -framework CoreAudio \
+            -framework SwiftUI \
+            -framework SceneKit

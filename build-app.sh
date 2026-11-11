@@ -18,7 +18,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="${SCRIPT_DIR}/Voice.app/Contents"
 MODEL_DIR="${HOME}/Library/Application Support/Voice/Models"
-MACOS_MIN="13.0"
+MACOS_MIN="14.0"
 
 "${SCRIPT_DIR}/engine/build.sh"
 
@@ -28,12 +28,22 @@ else
     ARCHS=("$(uname -m)")
 fi
 
+# Every Swift source: the app core, the engine wrapper, the design system,
+# the SwiftUI screens and the supporter store.
+SWIFT_SOURCES=(
+    "${SCRIPT_DIR}/Voice.swift"
+    "${SCRIPT_DIR}/SpeechEngine.swift"
+    "${SCRIPT_DIR}/ModelDownload.swift"
+    "${SCRIPT_DIR}"/Design/*.swift
+    "${SCRIPT_DIR}"/Views/*.swift
+    "${SCRIPT_DIR}"/Support/*.swift
+)
+
 # swiftc builds one arch per invocation; for a universal app compile each and
 # lipo the executables. The linker picks the matching slice from the fat engine.
 compile_arch() { # arch outfile
     swiftc -O -parse-as-library -target "$1-apple-macos${MACOS_MIN}" -o "$2" \
-        "${SCRIPT_DIR}/Voice.swift" \
-        "${SCRIPT_DIR}/SpeechEngine.swift" \
+        "${SWIFT_SOURCES[@]}" \
         "${SCRIPT_DIR}/VoiceExceptionCatcher.m" \
         -import-objc-header "${SCRIPT_DIR}/Voice-Bridging-Header.h" \
         -I"${SCRIPT_DIR}/engine" \
@@ -41,6 +51,7 @@ compile_arch() { # arch outfile
         -framework Cocoa -framework ApplicationServices \
         -framework UserNotifications -framework AVFoundation \
         -framework CoreAudio -framework Metal -framework Accelerate \
+        -framework SwiftUI -framework SceneKit -framework QuartzCore \
         -Xlinker -x \
         -Xlinker -dead_strip
 }
@@ -64,6 +75,8 @@ mkdir -p "${APP_DIR}/MacOS" "${APP_DIR}/Resources"
 cp "${SCRIPT_DIR}/Voice" "${APP_DIR}/MacOS/Voice"
 cp "${SCRIPT_DIR}/Info.plist" "${APP_DIR}/Info.plist"
 cp "${SCRIPT_DIR}/Voice.icns" "${APP_DIR}/Resources/Voice.icns"
+# Designed mic renders (MicModel.renderImage); styles without one are built from primitives.
+cp -R "${SCRIPT_DIR}/Resources/Mics" "${APP_DIR}/Resources/Mics"
 
 if [[ "${VOICE_BUNDLE_MODELS:-0}" == "1" ]]; then
     # File names must match ModelCatalog in SpeechEngine.swift.

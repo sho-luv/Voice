@@ -50,10 +50,19 @@ for tool in cmake git clang++ libtool lipo; do
     fi
 done
 
-STAMP_VALUE="${WHISPER_TAG} ${LLAMA_TAG} ${ARCHS[*]} $(shasum -a 256 "${ENGINE_DIR}/VoiceEngine.cpp" "${ENGINE_DIR}/VoiceEngine.h" "$0" | shasum -a 256 | cut -d' ' -f1)"
+# The stamp hashes file contents only (no paths), so a copied or moved checkout
+# keeps its cache. A universal lib also satisfies a host-arch build.
+STAMP_VALUE="${WHISPER_TAG} ${LLAMA_TAG} $(cat "${ENGINE_DIR}/VoiceEngine.cpp" "${ENGINE_DIR}/VoiceEngine.h" "$0" | shasum -a 256 | cut -d' ' -f1)"
 if [[ -f "${OUT_LIB}" && -f "${STAMP}" && "$(cat "${STAMP}")" == "${STAMP_VALUE}" ]]; then
-    echo "Engine up to date: ${OUT_LIB} (${ARCHS[*]})"
-    exit 0
+    HAVE_ARCHS="$(lipo -info "${OUT_LIB}" 2>/dev/null || true)"
+    MISSING=0
+    for arch in "${ARCHS[@]}"; do
+        [[ "${HAVE_ARCHS}" == *"${arch}"* ]] || MISSING=1
+    done
+    if [[ "${MISSING}" == 0 ]]; then
+        echo "Engine up to date: ${OUT_LIB} (${ARCHS[*]})"
+        exit 0
+    fi
 fi
 
 fetch() { # name url tag
@@ -91,6 +100,12 @@ build_arch() { # arch
         backend_flags=(-DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16)
     else
         backend_flags=(-DGGML_METAL=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON)
+    fi
+
+    # A CMake cache generated in another checkout (copied build dir) can't be reused.
+    if [[ -f "${llama}/CMakeCache.txt" ]] && ! grep -q "CMAKE_CACHEFILE_DIR:INTERNAL=${llama}$" "${llama}/CMakeCache.txt"; then
+        echo "Dropping CMake cache from another checkout (${arch})..."
+        rm -rf "${llama}"
     fi
 
     echo "Building llama.cpp ${LLAMA_TAG} + ggml (${arch})..."
