@@ -294,7 +294,7 @@ final class SpeechEngine {
 
 // Reads a 16-bit PCM mono WAV (what the recorder writes) into float samples.
 // Walks the RIFF chunks rather than assuming a 44-byte header.
-func loadPCM16Wav(at path: String) -> [Float]? {
+func loadPCM16Wav(at path: String, normalize: Bool = false) -> [Float]? {
     guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)), data.count > 12 else { return nil }
     return data.withUnsafeBytes { raw -> [Float]? in
         func u32(_ o: Int) -> Int { Int(raw.loadUnaligned(fromByteOffset: o, as: UInt32.self).littleEndian) }
@@ -313,6 +313,22 @@ func loadPCM16Wav(at path: String) -> [Float]? {
                 for i in 0..<count {
                     let s = raw.loadUnaligned(fromByteOffset: body + i * 2, as: Int16.self).littleEndian
                     samples[i] = Float(s) / 32768.0
+                }
+                if normalize, !samples.isEmpty {
+                    var peak: Float = 0
+                    var sum: Double = 0
+                    for sample in samples {
+                        peak = max(peak, abs(sample))
+                        sum += Double(sample) * Double(sample)
+                    }
+                    if sqrt(sum / Double(samples.count)) > 0.003, peak > 0 {
+                        let gain = min(20, (23170.0 / 32768.0) / Double(peak))
+                        if gain >= 1 {
+                            for i in samples.indices {
+                                samples[i] = Float(Int16(max(-32768, min(32767, Double(samples[i]) * 32768 * gain)))) / 32768
+                            }
+                        }
+                    }
                 }
                 return samples
             }
@@ -389,20 +405,40 @@ enum TextCleanup {
         return out
     }
 
+    private final class VocabularyCache {
+        private let lock = NSLock()
+        private var vocabulary: String?
+        private var rules: [(NSRegularExpression, String)] = []
+
+        func preparedRules(for value: String) -> [(NSRegularExpression, String)] {
+            lock.lock()
+            defer { lock.unlock() }
+            if vocabulary != value {
+                rules = value.components(separatedBy: CharacterSet(charactersIn: ",;\n"))
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { $0.count >= 2 && $0.rangeOfCharacter(from: .letters) != nil }
+                    .compactMap { term in
+                        let pattern = #"(?<![\w.])"# + NSRegularExpression.escapedPattern(for: term) + #"(?![\w])"#
+                        guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+                        return (re, NSRegularExpression.escapedTemplate(for: term))
+                    }
+                vocabulary = value
+            }
+            return rules
+        }
+    }
+
+    private static let vocabularyCache = VocabularyCache()
+
     /// Restores the user's spelling of vocabulary terms (case-insensitive
     /// whole-word match), e.g. "kubernetes" -> "Kubernetes". Works for both
     /// ASR models, unlike Whisper-only prompt biasing.
     static func applyVocabulary(_ text: String, vocabulary: String) -> String {
-        let terms = vocabulary
-            .components(separatedBy: CharacterSet(charactersIn: ",;\n"))
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { $0.count >= 2 && $0.rangeOfCharacter(from: .letters) != nil }
+        let rules = vocabularyCache.preparedRules(for: vocabulary)
         var out = text
-        for term in terms {
-            let pattern = #"(?<![\w.])"# + NSRegularExpression.escapedPattern(for: term) + #"(?![\w])"#
-            guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+        for (re, replacement) in rules {
             out = re.stringByReplacingMatches(in: out, range: NSRange(out.startIndex..., in: out),
-                                              withTemplate: NSRegularExpression.escapedTemplate(for: term))
+                                              withTemplate: replacement)
         }
         return out
     }
@@ -467,6 +503,30 @@ enum SelfTest {
         let model = useWhisper ? ModelCatalog.whisperTurbo : ModelCatalog.parakeet
         let context = AppContext(appName: "Slack", windowTitle: "", fieldRole: "")
         var failures = 0
+
+        let vocabularyCases = [
+            ("use github", "GitHub", "use GitHub"),
+            ("use github", "GITHUB", "use GITHUB"),
+            ("use github", "", "use github"),
+            ("github mygithub github.com", "GitHub", "GitHub mygithub GitHub.com"),
+            ("café c++ $api", "Café;C++;$API", "Café C++ $API"),
+        ]
+        for (input, vocabulary, expected) in vocabularyCases {
+            if TextCleanup.applyVocabulary(input, vocabulary: vocabulary) != expected {
+                print("Vocabulary regression failed for: \(vocabulary)")
+                failures += 1
+            }
+        }
+        let resultLock = NSLock()
+        DispatchQueue.concurrentPerform(iterations: 100) { index in
+            let spelling = index.isMultiple(of: 2) ? "GitHub" : "GITHUB"
+            if TextCleanup.applyVocabulary("github", vocabulary: spelling) != spelling {
+                resultLock.lock()
+                failures += 1
+                resultLock.unlock()
+            }
+        }
+        print("Vocabulary checks: \(failures == 0 ? "passed" : "FAILED")")
 
         func ms(_ start: Date) -> String { String(format: "%4.0f ms", Date().timeIntervalSince(start) * 1000) }
 

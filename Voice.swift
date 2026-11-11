@@ -223,17 +223,31 @@ class Settings {
         NSLog("Voice: saved transcript to %@", path)
     }
 
+    private var transcriptCache: [String: (modified: Date, size: UInt64, text: String)] = [:]
+
     func searchTranscripts(query: String) -> [(date: Date, text: String, path: String)] {
         let dir = transcriptDirectory
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(atPath: dir) else { return [] }
+        let paths = Set(files.map { (dir as NSString).appendingPathComponent($0) })
+        transcriptCache = transcriptCache.filter { paths.contains($0.key) }
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
 
         var results: [(date: Date, text: String, path: String)] = []
         for file in files.sorted().reversed() where file.hasSuffix(".txt") {
             let path = (dir as NSString).appendingPathComponent(file)
-            guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+            guard let attributes = try? fm.attributesOfItem(atPath: path),
+                  let modified = attributes[.modificationDate] as? Date,
+                  let size = attributes[.size] as? UInt64 else { continue }
+            let content: String
+            if let cached = transcriptCache[path], cached.modified == modified, cached.size == size {
+                content = cached.text
+            } else {
+                guard let loaded = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+                content = loaded
+                transcriptCache[path] = (modified, size, loaded)
+            }
             if query.isEmpty || content.localizedCaseInsensitiveContains(query) {
                 let datePart = file.replacingOccurrences(of: "voice_", with: "").replacingOccurrences(of: ".txt", with: "")
                 let date = formatter.date(from: datePart) ?? Date()
@@ -2087,6 +2101,8 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
     private var transcriptSearchField: NSSearchField!
     private var transcriptTableView: NSTableView!
     private var transcriptResults: [(date: Date, text: String, path: String)] = []
+    private let transcriptSearchQueue = DispatchQueue(label: "voice.history", qos: .userInitiated)
+    private var transcriptSearchGeneration = 0
     private var transcriptCountLabel: NSTextField!
 
     override func loadView() {
@@ -2600,7 +2616,19 @@ class SettingsViewController: NSViewController, NSTableViewDataSource, NSTableVi
 
     private func reloadTranscripts() {
         let query = transcriptSearchField?.stringValue ?? ""
-        transcriptResults = Settings.shared.searchTranscripts(query: query)
+        transcriptSearchGeneration += 1
+        let generation = transcriptSearchGeneration
+        transcriptSearchQueue.async { [weak self] in
+            let results = Settings.shared.searchTranscripts(query: query)
+            DispatchQueue.main.async {
+                guard let self, self.transcriptSearchGeneration == generation else { return }
+                self.transcriptResults = results
+                self.updateTranscriptResults(query: query)
+            }
+        }
+    }
+
+    private func updateTranscriptResults(query: String) {
         transcriptTableView?.reloadData()
         let count = transcriptResults.count
         if count == 0 {
@@ -2918,6 +2946,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     var isRestartingEngine = false
     var audioFileHandle: FileHandle?
     var audioDataSize: UInt32 = 0
+    private let audioWriteQueue = DispatchQueue(label: "voice.audio.write", qos: .userInitiated)
+    private var captureOverflow = false
     var currentAudioLevel: Float = 0.0  // Exposed for waveform overlay
     var zeroBufferCount: Int = 0
     var zeroSignalWarningShown: Bool = false
@@ -3349,6 +3379,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         handle.seek(toFileOffset: 44)
         audioFileHandle = handle
         audioDataSize = 0
+        captureOverflow = false
 
         if let error = startCaptureEngine() {
             abortCapture(error)
@@ -3364,6 +3395,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
 
     private func abortCapture(_ message: String) {
+        audioWriteQueue.sync {}
         audioFileHandle?.closeFile()
         audioFileHandle = nil
         if let file = audioFile { cleanup(file) }
@@ -3384,6 +3416,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
+        audioWriteQueue.sync {}
         // Delay dealloc — AVAudioIOUnit dispatch queue may have in-flight callbacks
         let engineRef = audioEngine
         audioEngine = nil
@@ -3402,6 +3435,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             appState = .idle
             updateIcon()
             hideOverlay()
+            return
+        }
+
+        guard !captureOverflow else {
+            if let file = audioFile { cleanup(file) }
+            finishProcessing(error: "Audio capture could not keep up. Please try again.")
             return
         }
 
@@ -3471,19 +3510,44 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             return "Failed to create audio converter"
         }
 
+        let pool = (0..<8).compactMap { _ in
+            AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: 65_536)
+        }
+        guard pool.count == 8, let captureHandle = audioFileHandle else { return "Failed to allocate capture buffers" }
+        let available = DispatchSemaphore(value: pool.count)
+        var bufferIndex = 0
         let tapBlock: AVAudioNodeTapBlock = { [weak self] buffer, _ in
             guard let self = self else { return }
             let capacity = AVAudioFrameCount(Double(buffer.frameLength) * 16000.0 / hwFormat.sampleRate)
-            guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: max(capacity, 1)) else { return }
+            guard capacity < 65_536, available.wait(timeout: .now()) == .success else {
+                self.audioWriteQueue.async { self.captureOverflow = true }
+                return
+            }
+            let convertedBuffer = pool[bufferIndex]
+            convertedBuffer.frameLength = 0
             var error: NSError?
+            var supplied = false
             converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
+                guard !supplied else { outStatus.pointee = .noDataNow; return nil }
+                supplied = true
                 outStatus.pointee = .haveData
                 return buffer
             }
-            guard error == nil, let channelData = convertedBuffer.int16ChannelData else { return }
+            guard error == nil, let channelData = convertedBuffer.int16ChannelData else {
+                available.signal()
+                self.audioWriteQueue.async { self.captureOverflow = true }
+                return
+            }
             let frameCount = Int(convertedBuffer.frameLength)
-            self.audioFileHandle?.write(Data(bytes: channelData[0], count: frameCount * 2))
-            self.audioDataSize += UInt32(frameCount * 2)
+            bufferIndex = (bufferIndex + 1) % pool.count
+            self.audioWriteQueue.async {
+                defer { available.signal() }
+                do {
+                    try captureHandle.write(contentsOf: Data(bytes: channelData[0], count: frameCount * 2))
+                    self.audioDataSize += UInt32(frameCount * 2)
+                } catch { self.captureOverflow = true }
+                _ = convertedBuffer
+            }
 
             // RMS level for the waveform overlay
             var sum: Float = 0
@@ -3557,8 +3621,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // Peak-normalize the WAV so quiet/mumbled speech is brought up to a
         // consistent level before the speech model sees it. This is the single
         // biggest quality win for low-volume input and costs ~10ms.
-        normalizeWavFile(at: audioFile)
-        let samples = loadPCM16Wav(at: audioFile)
+        let samples = loadPCM16Wav(at: audioFile, normalize: true)
         // Audio is in memory now — don't leave the recording on disk.
         cleanup(audioFile)
         guard let samples, !samples.isEmpty else {
@@ -3636,6 +3699,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     func refocusAndInject(_ text: String) {
         // Re-activate the app that was focused before recording started
         if let app = previousApp, !app.isTerminated {
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier {
+                textInjector.injectText(text)
+                return
+            }
             app.activate()
             // Give the app time to regain focus before injecting
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
@@ -3782,6 +3849,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
         audioEngine = nil
+        audioWriteQueue.sync {}
         audioFileHandle?.closeFile()
         audioFileHandle = nil
         if let file = audioFile {
