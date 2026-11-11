@@ -214,13 +214,23 @@ class Settings {
         let dir = transcriptDirectory
         let fm = FileManager.default
         if !fm.fileExists(atPath: dir) {
-            try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            try? fm.createDirectory(
+                atPath: dir,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
         }
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
         let filename = "voice_\(formatter.string(from: Date())).txt"
         let path = (dir as NSString).appendingPathComponent(filename)
-        try? text.write(toFile: path, atomically: true, encoding: .utf8)
+        do {
+            try text.write(toFile: path, atomically: true, encoding: .utf8)
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+        } catch {
+            NSLog("Voice: failed to save transcript: %@", error.localizedDescription)
+            return
+        }
         NSLog("Voice: saved transcript to %@", path)
     }
 
@@ -461,6 +471,20 @@ struct AppContext {
 
         return AppContext(appName: appName, windowTitle: windowTitle, fieldRole: fieldRole)
     }
+}
+
+func trustedUpdateDownloadURL(_ value: String) -> URL? {
+    guard let components = URLComponents(string: value),
+          components.scheme?.lowercased() == "https",
+          components.user == nil,
+          components.password == nil,
+          components.port == nil || components.port == 443,
+          let host = components.host?.lowercased() else { return nil }
+    let allowed = host == "github.com"
+        || host == "faradaysoft.com"
+        || host.hasSuffix(".githubusercontent.com")
+        || host.hasSuffix(".faradaysoft.com")
+    return allowed ? components.url : nil
 }
 
 // MARK: - Shared Cleanup Prompt
@@ -2430,12 +2454,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     @objc func checkForUpdates() {
         let appcastURL = URL(string: "https://faradaysoft.com/appcast.json")!
-        URLSession.shared.dataTask(with: appcastURL) { data, _, error in
+        URLSession.shared.dataTask(with: appcastURL) { data, response, error in
             DispatchQueue.main.async {
-                guard let data = data, error == nil,
+                guard let http = response as? HTTPURLResponse,
+                      http.statusCode == 200,
+                      http.url?.scheme?.lowercased() == "https",
+                      let responseHost = http.url?.host?.lowercased(),
+                      responseHost == "faradaysoft.com" || responseHost.hasSuffix(".faradaysoft.com"),
+                      let data = data, data.count <= 1_048_576, error == nil,
                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let latestVersion = json["version"] as? String,
-                      let downloadURL = json["url"] as? String else {
+                      let downloadURLString = json["url"] as? String,
+                      let downloadURL = trustedUpdateDownloadURL(downloadURLString) else {
                     let alert = NSAlert()
                     alert.messageText = "Update Check Failed"
                     alert.informativeText = "Could not reach the update server. Please try again later."
@@ -2469,7 +2499,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                     alert.addButton(withTitle: "Later")
                     alert.alertStyle = .informational
                     if alert.runModal() == .alertFirstButtonReturn {
-                        NSWorkspace.shared.open(URL(string: downloadURL)!)
+                        NSWorkspace.shared.open(downloadURL)
                     }
                 } else {
                     let alert = NSAlert()

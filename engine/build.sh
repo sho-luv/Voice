@@ -23,8 +23,10 @@
 
 set -euo pipefail
 
-WHISPER_TAG="v1.9.4"
+WHISPER_TAG="v1.9.5"
+WHISPER_COMMIT="d1be6fde11ac6e0407606b4e42fe72d34add8037"
 LLAMA_TAG="b11151"
+LLAMA_COMMIT="bd4f514db14d87fded667787a7a963bfbaa98e89"
 
 ENGINE_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEPS_DIR="${ENGINE_DIR}/.deps"
@@ -52,7 +54,7 @@ done
 
 # The stamp hashes file contents only (no paths), so a copied or moved checkout
 # keeps its cache. A universal lib also satisfies a host-arch build.
-STAMP_VALUE="${WHISPER_TAG} ${LLAMA_TAG} $(cat "${ENGINE_DIR}/VoiceEngine.cpp" "${ENGINE_DIR}/VoiceEngine.h" "$0" | shasum -a 256 | cut -d' ' -f1)"
+STAMP_VALUE="${WHISPER_TAG} ${WHISPER_COMMIT} ${LLAMA_TAG} ${LLAMA_COMMIT} $(cat "${ENGINE_DIR}/VoiceEngine.cpp" "${ENGINE_DIR}/VoiceEngine.h" "$0" | shasum -a 256 | cut -d' ' -f1)"
 if [[ -f "${OUT_LIB}" && -f "${STAMP}" && "$(cat "${STAMP}")" == "${STAMP_VALUE}" ]]; then
     HAVE_ARCHS="$(lipo -info "${OUT_LIB}" 2>/dev/null || true)"
     MISSING=0
@@ -65,19 +67,25 @@ if [[ -f "${OUT_LIB}" && -f "${STAMP}" && "$(cat "${STAMP}")" == "${STAMP_VALUE}
     fi
 fi
 
-fetch() { # name url tag
+fetch() {
     local dir="${DEPS_DIR}/$1"
-    if [[ -d "${dir}/.git" ]] && [[ "$(git -C "${dir}" describe --tags --exact-match 2>/dev/null)" == "$3" ]]; then
+    if [[ -d "${dir}/.git" ]] && [[ "$(git -C "${dir}" rev-parse HEAD 2>/dev/null)" == "$4" ]]; then
         return
     fi
     rm -rf "${dir}"
     echo "Fetching $1 $3..."
     git clone --quiet --depth 1 --branch "$3" "$2" "${dir}"
+    local actual
+    actual="$(git -C "${dir}" rev-parse HEAD)"
+    if [[ "${actual}" != "$4" ]]; then
+        echo "Error: $1 $3 resolved to ${actual}, expected $4" >&2
+        exit 1
+    fi
 }
 
 mkdir -p "${DEPS_DIR}"
-fetch whisper.cpp https://github.com/ggml-org/whisper.cpp "${WHISPER_TAG}"
-fetch llama.cpp   https://github.com/ggml-org/llama.cpp   "${LLAMA_TAG}"
+fetch whisper.cpp https://github.com/ggml-org/whisper.cpp "${WHISPER_TAG}" "${WHISPER_COMMIT}"
+fetch llama.cpp   https://github.com/ggml-org/llama.cpp   "${LLAMA_TAG}" "${LLAMA_COMMIT}"
 
 INCLUDES=(
     -I"${DEPS_DIR}/whisper.cpp/include"
@@ -132,13 +140,15 @@ build_arch() { # arch
     local cxxflags=(-std=c++17 -O3 -DNDEBUG -arch "${arch}" -mmacosx-version-min="${MACOS_MIN}")
     clang++ "${cxxflags[@]}" "${INCLUDES[@]}" -DWHISPER_VERSION="\"${WHISPER_TAG#v}\"" \
         -c "${DEPS_DIR}/whisper.cpp/src/whisper.cpp" -o "${obj}/whisper.o"
+    clang++ "${cxxflags[@]}" "${INCLUDES[@]}" \
+        -c "${DEPS_DIR}/whisper.cpp/src/aneforge/whisper-aneforge.cpp" -o "${obj}/whisper-aneforge.o"
     clang++ "${cxxflags[@]}" "${INCLUDES[@]}" -DPARAKEET_VERSION="\"${WHISPER_TAG#v}\"" \
         -c "${DEPS_DIR}/whisper.cpp/src/parakeet.cpp" -o "${obj}/parakeet.o"
     clang++ "${cxxflags[@]}" "${INCLUDES[@]}" -Wall -Wextra \
         -c "${ENGINE_DIR}/VoiceEngine.cpp" -o "${obj}/VoiceEngine.o"
 
     local libs=(
-        "${obj}/whisper.o" "${obj}/parakeet.o" "${obj}/VoiceEngine.o"
+        "${obj}/whisper.o" "${obj}/whisper-aneforge.o" "${obj}/parakeet.o" "${obj}/VoiceEngine.o"
         "${llama}/src/libllama.a"
         "${llama}/ggml/src/libggml.a"
         "${llama}/ggml/src/libggml-base.a"

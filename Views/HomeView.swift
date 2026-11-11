@@ -539,7 +539,11 @@ private struct HistoryPanel: View {
     private func openDirectory() {
         let dir = Settings.shared.transcriptDirectory
         if !FileManager.default.fileExists(atPath: dir) {
-            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            try? FileManager.default.createDirectory(
+                atPath: dir,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
         }
         NSWorkspace.shared.open(URL(fileURLWithPath: dir))
     }

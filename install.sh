@@ -61,6 +61,7 @@ fi
 # --- Install to /Applications ---
 rm -rf "${INSTALL_APP_DIR}"
 cp -R "${BUILD_APP_DIR}" "${INSTALL_APP_DIR}"
+codesign --verify --deep --strict --verbose=2 "${INSTALL_APP_DIR}"
 echo "Installed to ${INSTALL_APP_DIR}"
 
 # --- Install voice CLI tool ---

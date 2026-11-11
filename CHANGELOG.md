@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 4.0.2 - 2026-11-10
+
+### Security
+
+- Update whisper.cpp from 1.9.4 to 1.9.5, which includes the upstream model-loader bounds-check fix, and pin both native inference dependencies to immutable commit hashes.
+- Recheck every installed model against its pinned SHA-256 before loading it. Invalid downloaded models are rejected and removed, while model and transcript storage now uses private owner-only permissions.
+- Pin GitHub Actions to full commit hashes, limit signing and notarization secrets to the exact steps that need them, and publish releases from a separate least-privilege job with no signing secrets.
+- Accept update downloads only from approved HTTPS hosts, reject credentials and nonstandard ports, and validate update-server response status, origin, and size before parsing it.
+- Store CLI coordination files in the user's private temporary directory instead of shared predictable `/tmp` paths.
+- Make stapled-ticket and Gatekeeper checks mandatory for Developer ID release images, and verify the installed app's signature after copying it into `/Applications`.
+
 ### Performance and responsiveness
 
 - Cache compiled custom-vocabulary rules until vocabulary changes, with synchronized access for concurrent cleanup calls.
@@ -25,9 +36,7 @@ Measured on 2026-11-10 using seven alternating batches of 20 calls; values are m
 
 ### Verification
 
-- Native arm64 build and headless cleanup self-test.
+- Universal arm64/x86_64 build and headless cleanup self-tests on both architectures.
 - Twenty vocabulary output-equivalence comparisons covering empty input, Unicode, punctuation, word boundaries, and long text.
 - Persistent self-test cases cover vocabulary edits, clearing, boundaries, escaped terms, and 100 concurrent calls with alternating vocabularies.
-- Live microphone stress testing, Intel execution, and end-to-end latency comparisons remain unverified.
-
-This entry is for the next release; no new public release or downloadable package has been published.
+- Live microphone stress testing and end-to-end latency comparisons remain unverified.

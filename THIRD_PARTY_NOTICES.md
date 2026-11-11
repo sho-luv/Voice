@@ -7,7 +7,7 @@ It includes or downloads the following third-party components.
 
 | Component | Version | License |
 |-----------|---------|---------|
-| [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (Whisper + Parakeet inference) | v1.9.4 | MIT |
+| [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (Whisper + Parakeet inference) | v1.9.5 | MIT |
 | [llama.cpp](https://github.com/ggml-org/llama.cpp) (including ggml) | b11151 | MIT |
 
 Both projects are distributed under the following license:

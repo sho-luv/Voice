@@ -7,22 +7,19 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
     runs-on: macos-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      dmg_name: ${{ steps.dmg.outputs.name }}
     env:
       VOICE_NOTARY_PROFILE: voice-notarize
-      VOICE_CODESIGN_IDENTITY: ${{ secrets.VOICE_CODESIGN_IDENTITY }}
-      VOICE_BUILD_CERTIFICATE_P12_BASE64: ${{ secrets.VOICE_BUILD_CERTIFICATE_P12_BASE64 }}
-      VOICE_BUILD_CERTIFICATE_PASSWORD: ${{ secrets.VOICE_BUILD_CERTIFICATE_PASSWORD }}
-      VOICE_NOTARY_APPLE_ID: ${{ secrets.VOICE_NOTARY_APPLE_ID }}
-      VOICE_NOTARY_TEAM_ID: ${{ secrets.VOICE_NOTARY_TEAM_ID }}
-      VOICE_NOTARY_APP_SPECIFIC_PASSWORD: ${{ secrets.VOICE_NOTARY_APP_SPECIFIC_PASSWORD }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Resolve version
         id: version
@@ -43,6 +40,13 @@ jobs:
 
       - name: Require release secrets
         if: github.ref_type == 'tag'
+        env:
+          VOICE_CODESIGN_IDENTITY: ${{ secrets.VOICE_CODESIGN_IDENTITY }}
+          VOICE_BUILD_CERTIFICATE_P12_BASE64: ${{ secrets.VOICE_BUILD_CERTIFICATE_P12_BASE64 }}
+          VOICE_BUILD_CERTIFICATE_PASSWORD: ${{ secrets.VOICE_BUILD_CERTIFICATE_PASSWORD }}
+          VOICE_NOTARY_APPLE_ID: ${{ secrets.VOICE_NOTARY_APPLE_ID }}
+          VOICE_NOTARY_TEAM_ID: ${{ secrets.VOICE_NOTARY_TEAM_ID }}
+          VOICE_NOTARY_APP_SPECIFIC_PASSWORD: ${{ secrets.VOICE_NOTARY_APP_SPECIFIC_PASSWORD }}
         run: |
           missing=()
           for var_name in \
@@ -68,7 +72,10 @@ jobs:
 
       - name: Import signing certificate
         id: keychain
-        if: env.VOICE_BUILD_CERTIFICATE_P12_BASE64 != '' && env.VOICE_BUILD_CERTIFICATE_PASSWORD != ''
+        if: github.ref_type == 'tag'
+        env:
+          VOICE_BUILD_CERTIFICATE_P12_BASE64: ${{ secrets.VOICE_BUILD_CERTIFICATE_P12_BASE64 }}
+          VOICE_BUILD_CERTIFICATE_PASSWORD: ${{ secrets.VOICE_BUILD_CERTIFICATE_PASSWORD }}
         run: |
           KEYCHAIN_PATH="${RUNNER_TEMP}/voice-build.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
@@ -89,7 +96,11 @@ jobs:
           echo "path=${KEYCHAIN_PATH}" >> "$GITHUB_OUTPUT"
 
       - name: Configure notarization profile
-        if: env.VOICE_NOTARY_APPLE_ID != '' && env.VOICE_NOTARY_TEAM_ID != '' && env.VOICE_NOTARY_APP_SPECIFIC_PASSWORD != ''
+        if: github.ref_type == 'tag'
+        env:
+          VOICE_NOTARY_APPLE_ID: ${{ secrets.VOICE_NOTARY_APPLE_ID }}
+          VOICE_NOTARY_TEAM_ID: ${{ secrets.VOICE_NOTARY_TEAM_ID }}
+          VOICE_NOTARY_APP_SPECIFIC_PASSWORD: ${{ secrets.VOICE_NOTARY_APP_SPECIFIC_PASSWORD }}
         run: |
           xcrun notarytool store-credentials "${VOICE_NOTARY_PROFILE}" \
             --apple-id "${VOICE_NOTARY_APPLE_ID}" \
@@ -97,6 +108,13 @@ jobs:
             --password "${VOICE_NOTARY_APP_SPECIFIC_PASSWORD}"
 
       - name: Build signed DMG
+        if: github.ref_type == 'tag'
+        env:
+          VOICE_CODESIGN_IDENTITY: ${{ secrets.VOICE_CODESIGN_IDENTITY }}
+        run: ./create-dmg.sh
+
+      - name: Build unsigned DMG for manual verification
+        if: github.ref_type != 'tag'
         run: ./create-dmg.sh
 
       - name: Resolve DMG path
@@ -107,24 +125,14 @@ jobs:
             echo "::error::Expected DMG not found at ${DMG_PATH}"
             exit 1
           fi
+          echo "name=${DMG_PATH}" >> "$GITHUB_OUTPUT"
           echo "path=${DMG_PATH}" >> "$GITHUB_OUTPUT"
 
       - name: Upload release artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Voice-${{ steps.version.outputs.version }}-dmg
           path: ${{ steps.dmg.outputs.path }}
-
-      - name: Publish GitHub release
-        if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
-        with:
-          name: Voice ${{ steps.version.outputs.version }}
-          tag_name: ${{ github.ref_name }}
-          files: ${{ steps.dmg.outputs.path }}
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
 
       - name: Cleanup keychain
         if: always()
@@ -132,3 +140,25 @@ jobs:
           if [[ -n "${{ steps.keychain.outputs.path }}" ]] && [[ -f "${{ steps.keychain.outputs.path }}" ]]; then
             security delete-keychain "${{ steps.keychain.outputs.path }}"
           fi
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download signed release artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: Voice-${{ needs.release.outputs.version }}-dmg
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          name: Voice ${{ needs.release.outputs.version }}
+          tag_name: ${{ github.ref_name }}
+          files: ${{ needs.release.outputs.dmg_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

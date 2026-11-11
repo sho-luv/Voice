@@ -47,6 +47,23 @@ struct ModelSpec {
 
     var isInstalled: Bool { installedPath != nil }
 
+    var verifiedInstalledPath: String? {
+        guard let path = installedPath else { return nil }
+        if path == downloadPath {
+            let fm = FileManager.default
+            try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: ModelSpec.modelDirectory)
+            try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+        }
+        guard sha256Hex(ofFileAt: path) == sha256 else {
+            NSLog("Voice: refusing model with invalid checksum: %@", path)
+            if path == downloadPath {
+                try? FileManager.default.removeItem(atPath: path)
+            }
+            return nil
+        }
+        return path
+    }
+
     var sizeDescription: String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
@@ -243,7 +260,7 @@ final class SpeechEngine {
         if let asr { ve_asr_free(asr) }
         asr = nil
         asrModelID = nil
-        guard let path = model.installedPath else {
+        guard let path = model.verifiedInstalledPath else {
             NSLog("Voice: speech model %@ not installed", model.id)
             return nil
         }
@@ -260,7 +277,7 @@ final class SpeechEngine {
 
     private func loadCleanup() -> OpaquePointer? {
         if let llm { return llm }
-        guard let path = ModelCatalog.cleanup.installedPath else { return nil }
+        guard let path = ModelCatalog.cleanup.verifiedInstalledPath else { return nil }
         let start = Date()
         llm = ve_llm_load(path, llmContextSize)
         if llm != nil {
@@ -528,11 +545,33 @@ enum SelfTest {
         }
         print("Vocabulary checks: \(failures == 0 ? "passed" : "FAILED")")
 
+        let updateURLCases = [
+            ("https://github.com/sho-luv/Voice/releases/download/v4.0.2/Voice.dmg", true),
+            ("https://objects.githubusercontent.com/github-production-release-asset/Voice.dmg", true),
+            ("https://faradaysoft.com/download/Voice.dmg", true),
+            ("http://faradaysoft.com/Voice.dmg", false),
+            ("https://evil.example/Voice.dmg", false),
+            ("file:///tmp/Voice.dmg", false),
+            ("voice://thanks", false),
+            ("https://faradaysoft.com.evil.example/Voice.dmg", false),
+            ("https://user@github.com/Voice.dmg", false),
+            ("https://github.com:444/Voice.dmg", false),
+        ]
+        let urlFailuresBefore = failures
+        for (value, shouldTrust) in updateURLCases {
+            let trusted = trustedUpdateDownloadURL(value) != nil
+            if trusted != shouldTrust {
+                print("Update URL regression failed for: \(value)")
+                failures += 1
+            }
+        }
+        print("Update URL checks: \(failures == urlFailuresBefore ? "passed" : "FAILED")")
+
         func ms(_ start: Date) -> String { String(format: "%4.0f ms", Date().timeIntervalSince(start) * 1000) }
 
         print("speech model: \(model.id) — \(model.installedPath ?? "NOT INSTALLED")")
         print("cleanup model: \(ModelCatalog.cleanup.installedPath ?? "NOT INSTALLED")")
-        guard model.isInstalled else { return 2 }
+        guard model.verifiedInstalledPath != nil else { return 2 }
 
         for file in files {
             guard let samples = loadPCM16Wav(at: file) else {

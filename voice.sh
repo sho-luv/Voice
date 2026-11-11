@@ -10,6 +10,7 @@
 #
 
 set -euo pipefail
+umask 077
 
 # --- Defaults ---
 MODEL_DIR="${HOME}/Library/Application Support/Voice/Models"
@@ -38,8 +39,20 @@ while getopts "m:skh" opt; do
     esac
 done
 
-STOP_FILE="/tmp/voice_stop_signal"
-PID_FILE="/tmp/voice_rec.pid"
+USER_TEMP_DIR="${TMPDIR:-}"
+if [[ -z "$USER_TEMP_DIR" ]] && command -v getconf &>/dev/null; then
+    USER_TEMP_DIR="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || true)"
+fi
+if [[ -z "$USER_TEMP_DIR" ]]; then
+    echo "Error: Could not determine a private temporary directory." >&2
+    exit 1
+fi
+
+STATE_DIR="${USER_TEMP_DIR%/}/com.faradaysoft.voice-cli"
+mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR"
+STOP_FILE="${STATE_DIR}/stop"
+PID_FILE="${STATE_DIR}/recording.pid"
 
 # --- Handle "voice stop" subcommand ---
 shift $((OPTIND - 1))
@@ -92,7 +105,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # --- Create temp audio file ---
-AUDIO_FILE="$(mktemp /tmp/voice_XXXXXX.wav)"
+AUDIO_FILE="$(mktemp "${USER_TEMP_DIR%/}/voice_XXXXXX.wav")"
 
 # --- Audio indicators ---
 beep_start() { afplay /System/Library/Sounds/Tink.aiff 2>/dev/null & }

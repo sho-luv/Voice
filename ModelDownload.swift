@@ -43,7 +43,13 @@ final class ModelDownloadWindowController: NSObject, URLSessionDownloadDelegate 
         progress.complete = false
         progress.status = "Fetching \(spec.displayName) from Hugging Face..."
 
-        try? FileManager.default.createDirectory(atPath: ModelSpec.modelDirectory, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        try? fm.createDirectory(
+            atPath: ModelSpec.modelDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: ModelSpec.modelDirectory)
         if session == nil {
             session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
         }
@@ -70,6 +76,7 @@ final class ModelDownloadWindowController: NSObject, URLSessionDownloadDelegate 
         try? FileManager.default.removeItem(atPath: partial)
         do {
             try FileManager.default.moveItem(at: location, to: URL(fileURLWithPath: partial))
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: partial)
         } catch {
             fail("Error: \(error.localizedDescription)")
             return

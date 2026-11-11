@@ -108,18 +108,19 @@ if [[ "$USE_DEVELOPER_ID" == "true" ]]; then
         xcrun stapler staple "${SCRIPT_DIR}/${DMG_NAME}"
         echo "Notarization complete."
     else
-        echo ""
-        echo "Notarization credentials not configured. To set up (one-time):"
+        echo "Error: Notarization credentials are required for a Developer ID release." >&2
+        echo "Configure them with:" >&2
         echo "  xcrun notarytool store-credentials ${NOTARY_PROFILE} \\"
         echo "    --apple-id YOUR_APPLE_ID \\"
         echo "    --team-id MWW7M2563A \\"
         echo "    --password APP_SPECIFIC_PASSWORD"
-        echo ""
-        echo "Then re-run this script to notarize and staple."
+        exit 1
     fi
 
-    echo "Verifying with Gatekeeper..."
-    spctl --assess --type execute -vvvv "${SCRIPT_DIR}/Voice.app" || true
+    echo "Validating stapled notarization ticket..."
+    xcrun stapler validate "${SCRIPT_DIR}/${DMG_NAME}"
+    echo "Verifying DMG with Gatekeeper..."
+    spctl --assess --type open --context context:primary-signature -vvvv "${SCRIPT_DIR}/${DMG_NAME}"
 fi
 
 echo ""
