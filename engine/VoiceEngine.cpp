@@ -34,6 +34,7 @@ struct ve_llm {
     llama_sampler * smpl  = nullptr;
     const llama_vocab * vocab = nullptr;
     std::string tmpl;
+    std::vector<llama_token> cached_prompt;
 };
 
 static bool g_verbose = false;
@@ -203,14 +204,27 @@ char * ve_llm_generate(ve_llm * llm, const char * system, const char * user, int
     if ((int) prompt.size() >= n_ctx - 8) return nullptr;
     if ((int) prompt.size() + max_tokens > n_ctx) max_tokens = n_ctx - (int) prompt.size();
 
-    llama_memory_clear(llama_get_memory(llm->ctx), true);
+    size_t common = 0;
+    while (common < llm->cached_prompt.size() && common + 1 < prompt.size()
+           && llm->cached_prompt[common] == prompt[common]) ++common;
+    auto memory = llama_get_memory(llm->ctx);
+    if (!llama_memory_seq_rm(memory, 0, (llama_pos) common, -1)) {
+        llama_memory_clear(memory, true);
+        common = 0;
+    }
+    llm->cached_prompt.clear();
     llama_sampler_reset(llm->smpl);
 
     std::string out;
-    llama_batch batch = llama_batch_get_one(prompt.data(), (int32_t) prompt.size());
+    llama_batch batch = llama_batch_get_one(prompt.data() + common, (int32_t) (prompt.size() - common));
     llama_token tok;
     for (int i = 0; i < max_tokens; ++i) {
-        if (llama_decode(llm->ctx, batch) != 0) return nullptr;
+        if (llama_decode(llm->ctx, batch) != 0) {
+            llm->cached_prompt.clear();
+            llama_memory_clear(memory, true);
+            return nullptr;
+        }
+        if (i == 0) llm->cached_prompt = prompt;
         tok = llama_sampler_sample(llm->smpl, llm->ctx, -1);
         if (llama_vocab_is_eog(llm->vocab, tok)) break;
         char piece[256];
