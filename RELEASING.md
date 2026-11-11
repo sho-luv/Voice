@@ -5,6 +5,7 @@ Releases are built, signed, notarized and published by GitHub Actions
 
 ## How it works
 
+- Before tagging, move `CHANGELOG.md`'s Unreleased entry into the new version and include it in the published release notes. Preserve measurement conditions and verification limits; component timings are not end-to-end speedup claims.
 - **Version:** `CFBundleShortVersionString` in `Info.plist` is the single source of truth.
   The workflow refuses a tag that doesn't match it (`v3.3` requires `3.3`).
 - **CI** (`ci.yml`, every push and PR): shell syntax, plist lint, and a Swift typecheck.
