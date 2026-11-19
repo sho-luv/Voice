@@ -2129,7 +2129,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             }
         }
 
-        var hwFormat = inputNode.outputFormat(forBus: 0)
+        // Read the device's own format from the input side of the node. After switching
+        // the device above, outputFormat(forBus:) can still report the previous device's
+        // rate: the built-in mic was at 44.1 kHz while it said 48 kHz, and a tap installed
+        // with that stale format starts without error but never receives a buffer, so every
+        // recording came back empty ("Recording too short", 2026-11-11).
+        var hwFormat = inputNode.inputFormat(forBus: 0)
         // If format is invalid (0 channels / 0 sample rate), the device selection failed silently.
         // Reset to system default and retry with a fresh engine.
         if hwFormat.channelCount == 0 || hwFormat.sampleRate == 0 {
@@ -2137,7 +2142,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             Settings.shared.micDeviceUID = ""
             engine = AVAudioEngine()
             inputNode = engine.inputNode
-            hwFormat = inputNode.outputFormat(forBus: 0)
+            hwFormat = inputNode.inputFormat(forBus: 0)
         }
         guard hwFormat.channelCount > 0, hwFormat.sampleRate > 0 else {
             return "No valid microphone found"
