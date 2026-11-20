@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+<!-- DRAFT for 4.0.4: version number and wording still to be confirmed by Leon. -->
+
+### 4.0.4 (draft) - merges the voice2 recording-accuracy work into the 4.0.2 line
+
+#### Fixed
+
+- Voice no longer freezes when recording starts. Capture moved from AVAudioEngine to an AudioQueue
+  (`AudioCapture.swift`) that runs off the main thread, with 5 s start and 3 s stop watchdogs. The old
+  `AVAudioEngine.inputNode` call could hang the main thread inside CoreAudio and take the hotkey down
+  with it (2026-10-14, 2026-10-28, 2026-11-18).
+- Overlay fonts are cached, which fixes a crash mid-recording on macOS 26 (NSInvalidArgumentException
+  while measuring overlay text).
+- A recording whose file write fails is reported instead of transcribed with gaps (4.0.2 behaviour,
+  now on the AudioQueue path).
+
+#### Recording quality
+
+- Voice activity detection (bundled Silero v6.2.0) trims silence and splits long recordings at pauses
+  into pieces of at most 28 s. Whisper on recordings over 30 s: 28.7% -> 3.2% word errors.
+- Capture keeps running 250 ms after the key is released, so the last word isn't clipped.
+- A mic that sends only zeros for 2 s is swapped for the built-in mic.
+- Custom vocabulary accepts "heard = written" corrections, with the 4.0.2 compiled-rule cache kept.
+- `Voice --bench` and `tools/bench` measure word error rate.
+
 ## 4.0.2 - 2026-11-10
 
 ### Security

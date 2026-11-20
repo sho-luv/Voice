@@ -25,6 +25,44 @@ On dictation-style clips (TTS voices, tech jargon) the two trade single errors: 
 
 **Not tried yet:** Parakeet TDT 0.6B **v2** (English-only, reportedly slightly better English WER than v3) — no official ggml conversion when this was written. `JoaoZaokk/parakeet-tdt-0.6b-v2-ggml` exists but is unofficial.
 
+## Audio preparation (4.0.3)
+
+What happens to a recording between the microphone and the model, and what each step is worth. Measured 2026-11-10 on an M4 Max with `Voice --bench` (`tools/bench/`): the same 73 LibriSpeech utterances as above, plus copies with the faults a real dictation has, and the whole set joined into one 8-minute recording. Numbers are word errors out of 1150 (1453 for the two long recordings together).
+
+| Test set | Parakeet, 4.0.2 | Parakeet, 4.0.3 | Whisper, 4.0.2 | Whisper, 4.0.3 |
+|---|---|---|---|---|
+| Clean | 42 | 40 | 41 | 41 |
+| Quiet talker + one loud key click | 47 | 36 | 44 | 37 |
+| Very quiet (peak -54 dBFS) | 56 | 42 | 48 | 36 |
+| 1.5 s of room tone before and after | 47 | 39 | 44 | 42 |
+| Room noise, 10 dB SNR | 66 | 62 | 60 | 58 |
+| Clipped (input gain too high) | 56 | 58 | 48 | 53 |
+| Last 400 ms cut off | 48 | 44 | 42 | 44 |
+| **Long recordings (80 s and 8 min)** | **71** (4.9%) | **53** (3.7%) | **417** (28.7%) | **46** (3.2%) |
+| **No speech** (silence, room tone, clicks; 5 files) | 5 of 5 empty | 5 of 5 rejected | **5 of 5 typed text** ("Thank you.", "Okay.", "you") | 5 of 5 rejected |
+
+What changed in 4.0.3 (`AudioPrep` in `AudioPrep.swift`, `SpeechEngine.transcribeRecording`):
+
+1. **Voice activity detection** (Silero v6.2.0 through whisper.cpp, 0.9 MB, bundled, CPU). A recording with less than 0.12 s of speech is rejected as "No speech detected". Before this, Whisper typed "Thank you." for a stray press of the key.
+2. **Trim to the speech**, keeping 0.3 s on each side.
+3. **Cut long recordings at pauses.** Pieces are at most 28 s, always split at a pause of 2 s or more, and otherwise at the widest pause in the second half of the piece. Whisper was the big one: with `no_timestamps` it moves through long audio in fixed 30 s windows and drops the words at every boundary, so anything over 30 s lost about a quarter of its words. Parakeet has no window but still does better on short pieces. Chunk limits tried on the long set (Parakeet errors): 20 s 54, **28 s 53**, 45 s 67, 60 s 55.
+4. **Level** is set from the 99.9th percentile instead of the single loudest sample, once before detection and once over the detected speech. The first pass is there for the detector, not the recognizer: on the very quiet set Silero missed speech and Parakeet went to 23.5% without it.
+
+Found along the way:
+
+- **The 4.0.2 peak normalization did nothing measurable.** "Old" and "no preparation at all" score the same on every set for both models. Their log-mel front ends are level-invariant; only speech near the bottom of the 16-bit range loses anything, and that is quantization, which no gain brings back.
+- **A high-pass filter at 80 Hz** (DC offset, mains hum) was a wash: 564 total errors with it, 559 without. Not shipped.
+- **Clipping and room noise are not fixed by preparation.** Both are capture problems.
+- Cost: about 10 ms per utterance for detection.
+
+Capture changes in 4.0.3 that the bench can't see (LibriSpeech clips end in silence, so "last 400 ms cut" barely registers there):
+
+- The capture keeps running for 250 ms after the key is released, and the stopping queue's part-filled last buffer (up to 100 ms) is now written instead of dropped. Measured with the built-in mic: a 0.577 s capture delivers 0.580 s of audio.
+- The microphone is asked to start before the overlay is drawn and the cue is played.
+- A microphone that sends only zeros for 2 s is replaced by the Mac's built-in one for the rest of the recording.
+
+**Not tried yet:** capturing in Float32 (would keep very quiet speech above the 16-bit floor); a pre-roll buffer for the first word (needs the mic open before the key press, which the privacy stance rules out); Parakeet beam search.
+
 ## Engine: why in-process
 
 Until 3.2.6 each dictation spawned `whisper-cli` then `llama-completion`. Measured on the same machine:

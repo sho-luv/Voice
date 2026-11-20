@@ -108,6 +108,16 @@ enum ModelCatalog {
         bytes: 1_066_227_232
     )
 
+    // Silero VAD v6.2.0 (ggml, 0.9 MB), shipped inside the app bundle: it gates every
+    // recording, so it can't wait for a download. Source and checksum are in
+    // build-app.sh. VOICE_VAD_MODEL lets `--bench` runs from a bare binary find it.
+    static let voiceActivityFileName = "ggml-silero-v6.2.0.bin"
+    static var voiceActivityPath: String? {
+        var candidates = [(Bundle.main.resourcePath ?? "") + "/Models/" + voiceActivityFileName]
+        if let override = ProcessInfo.processInfo.environment["VOICE_VAD_MODEL"] { candidates.insert(override, at: 0) }
+        return candidates.first { FileManager.default.fileExists(atPath: $0) }
+    }
+
     static let speechModels = [parakeet, whisperTurbo]
 
     static func speech(id: String) -> ModelSpec {
@@ -166,6 +176,8 @@ final class SpeechEngine {
     private var asr: OpaquePointer?
     private var asrModelID: String?
     private var llm: OpaquePointer?
+    private var vad: OpaquePointer?
+    private var vadUnavailable = false
     private var idleUnload: DispatchWorkItem?
 
     // Resident models cost ~0.4-1.5 GB. Free them after a quiet spell; the
@@ -228,6 +240,52 @@ final class SpeechEngine {
         }
     }
 
+    enum Transcript {
+        case text(String)
+        /// The recording holds no speech (silence, a click, room noise).
+        case noSpeech
+        case failed
+    }
+
+    /// The app's path from a finished recording to text: find the speech, drop the
+    /// silence, cut long recordings at pauses and transcribe the pieces in order. See
+    /// `AudioPrep`. Without the voice activity model it falls back to the whole recording
+    /// in one piece. Blocks; call off the main thread.
+    func transcribeRecording(_ recording: [Float], model: ModelSpec, prompt: String, language: String) -> Transcript {
+        queue.sync {
+            defer { scheduleIdleUnload() }
+            guard let asr = loadSpeech(model) else { return .failed }
+            var samples = recording
+            var pieces: [[Float]]
+            AudioPrep.normalize(&samples)
+            if let speech = speechSegments(in: samples) {
+                AudioPrep.normalize(&samples, speech: speech)
+                pieces = AudioPrep.chunks(of: samples, speech: speech)
+                if pieces.isEmpty { return .noSpeech }
+            } else {
+                pieces = [samples]
+            }
+            var texts: [String] = []
+            for piece in pieces {
+                // Both models want at least a second of audio: Whisper refuses less, and a
+                // lone "yes" sits better with some room after it.
+                var audio = piece
+                if audio.count < 16_000 { audio += [Float](repeating: 0, count: 16_000 - audio.count) }
+                let result = audio.withUnsafeBufferPointer { buf in
+                    language.withCString { lang in
+                        ve_asr_transcribe(asr, buf.baseAddress, Int32(buf.count),
+                                          prompt.isEmpty ? nil : prompt, lang, threads)
+                    }
+                }
+                guard let result else { return .failed }
+                let text = String(cString: result).trimmingCharacters(in: .whitespacesAndNewlines)
+                ve_free(result)
+                if !text.isEmpty { texts.append(text) }
+            }
+            return .text(texts.joined(separator: " "))
+        }
+    }
+
     /// Runs the cleanup LLM on `text`. Returns nil if the model is missing or
     /// generation fails. Blocks; call off the main thread.
     func generateCleanup(_ text: String, systemPrompt: String) -> String? {
@@ -275,6 +333,37 @@ final class SpeechEngine {
         return asr
     }
 
+    /// Where the speech is, or nil when the voice activity model can't be used.
+    private func speechSegments(in samples: [Float]) -> [AudioPrep.Segment]? {
+        guard let vad = loadVAD() else { return nil }
+        let capacity = 4096
+        var raw = [Int32](repeating: 0, count: capacity * 2)
+        // The detector caps a stretch of speech below the chunk limit, so a speaker who
+        // never pauses still gets cut at the quietest point instead of mid-word.
+        let maxSpeech = Float(AudioPrep.maxChunkSeconds * 0.7)
+        let n = samples.withUnsafeBufferPointer { buf in
+            ve_vad_segments(vad, buf.baseAddress, Int32(buf.count), maxSpeech, &raw, Int32(capacity))
+        }
+        guard n >= 0 else { return nil }
+        return (0..<Int(n)).map { (start: Int(raw[2 * $0]), end: Int(raw[2 * $0 + 1])) }
+    }
+
+    private func loadVAD() -> OpaquePointer? {
+        if let vad { return vad }
+        if vadUnavailable { return nil }
+        guard let path = ModelCatalog.voiceActivityPath else {
+            vadUnavailable = true
+            NSLog("Voice: voice activity model not found, transcribing recordings whole")
+            return nil
+        }
+        vad = ve_vad_load(path, min(threads, 4))
+        if vad == nil {
+            vadUnavailable = true
+            NSLog("Voice: failed to load voice activity model %@", path)
+        }
+        return vad
+    }
+
     private func loadCleanup() -> OpaquePointer? {
         if let llm { return llm }
         guard let path = ModelCatalog.cleanup.verifiedInstalledPath else { return nil }
@@ -301,6 +390,8 @@ final class SpeechEngine {
     private func freeAll() {
         if let asr { ve_asr_free(asr) }
         if let llm { ve_llm_free(llm) }
+        if let vad { ve_vad_free(vad) }
+        vad = nil
         asr = nil
         asrModelID = nil
         llm = nil
@@ -422,6 +513,42 @@ enum TextCleanup {
         return out
     }
 
+    /// One entry of the custom vocabulary: a term to spell exactly ("Kubernetes"), or a
+    /// correction for something the recognizer keeps mis-hearing ("cooper netties = Kubernetes").
+    struct VocabularyEntry {
+        let heard: String?
+        let written: String
+    }
+
+    /// Entries are separated by commas, semicolons or new lines. "heard = written" (or
+    /// "heard -> written") is a correction; anything else is a term.
+    static func parseVocabulary(_ vocabulary: String) -> [VocabularyEntry] {
+        vocabulary
+            .components(separatedBy: CharacterSet(charactersIn: ",;\n"))
+            .compactMap { raw -> VocabularyEntry? in
+                let entry = raw.trimmingCharacters(in: .whitespaces)
+                for arrow in ["->", "\u{2192}", "="] {
+                    guard let r = entry.range(of: arrow) else { continue }
+                    let heard = entry[..<r.lowerBound].trimmingCharacters(in: .whitespaces)
+                    let written = entry[r.upperBound...].trimmingCharacters(in: .whitespaces)
+                    guard heard.count >= 2, !written.isEmpty else { return nil }
+                    return VocabularyEntry(heard: heard, written: written)
+                }
+                guard entry.count >= 2, entry.rangeOfCharacter(from: .letters) != nil else { return nil }
+                return VocabularyEntry(heard: nil, written: entry)
+            }
+    }
+
+    /// The spellings the user wants, without the mis-hearings: what the Whisper prompt and
+    /// the cleanup prompt should see.
+    static func vocabularyTerms(_ vocabulary: String) -> String {
+        var seen = Set<String>()
+        return parseVocabulary(vocabulary).map(\.written).filter { seen.insert($0.lowercased()).inserted }
+            .joined(separator: ", ")
+    }
+
+    /// The compiled replacement rules for the current vocabulary, rebuilt only when the
+    /// vocabulary text changes (merged from 4.0.2's per-call regex cache).
     private final class VocabularyCache {
         private let lock = NSLock()
         private var vocabulary: String?
@@ -431,14 +558,7 @@ enum TextCleanup {
             lock.lock()
             defer { lock.unlock() }
             if vocabulary != value {
-                rules = value.components(separatedBy: CharacterSet(charactersIn: ",;\n"))
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { $0.count >= 2 && $0.rangeOfCharacter(from: .letters) != nil }
-                    .compactMap { term in
-                        let pattern = #"(?<![\w.])"# + NSRegularExpression.escapedPattern(for: term) + #"(?![\w])"#
-                        guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
-                        return (re, NSRegularExpression.escapedTemplate(for: term))
-                    }
+                rules = TextCleanup.compileVocabularyRules(value)
                 vocabulary = value
             }
             return rules
@@ -447,15 +567,37 @@ enum TextCleanup {
 
     private static let vocabularyCache = VocabularyCache()
 
-    /// Restores the user's spelling of vocabulary terms (case-insensitive
-    /// whole-word match), e.g. "kubernetes" -> "Kubernetes". Works for both
-    /// ASR models, unlike Whisper-only prompt biasing.
+    /// Corrections first, longest mis-hearing first (so "cooper netties cluster" wins over
+    /// "cooper"), matched case-insensitively across any spacing or hyphens; then every term
+    /// gets the user's spelling back.
+    fileprivate static func compileVocabularyRules(_ vocabulary: String) -> [(NSRegularExpression, String)] {
+        let entries = parseVocabulary(vocabulary)
+        func rule(_ pattern: String, _ written: String) -> (NSRegularExpression, String)? {
+            guard let re = try? NSRegularExpression(pattern: #"(?<![\w.])"# + pattern + #"(?![\w])"#,
+                                                    options: [.caseInsensitive]) else { return nil }
+            return (re, NSRegularExpression.escapedTemplate(for: written))
+        }
+        var rules: [(NSRegularExpression, String)] = []
+        for entry in entries.sorted(by: { ($0.heard?.count ?? 0) > ($1.heard?.count ?? 0) }) {
+            guard let heard = entry.heard else { continue }
+            let words = heard.split(whereSeparator: { $0 == " " || $0 == "-" })
+                .map { NSRegularExpression.escapedPattern(for: String($0)) }
+            guard !words.isEmpty, let r = rule(words.joined(separator: #"[\s-]+"#), entry.written) else { continue }
+            rules.append(r)
+        }
+        for entry in entries {
+            if let r = rule(NSRegularExpression.escapedPattern(for: entry.written), entry.written) { rules.append(r) }
+        }
+        return rules
+    }
+
+    /// Applies the custom vocabulary to a transcript, for both ASR models (unlike
+    /// Whisper-only prompt biasing): corrections replace what was heard ("cooper-netties"
+    /// too), then every term gets the user's spelling back ("kubernetes" -> "Kubernetes").
     static func applyVocabulary(_ text: String, vocabulary: String) -> String {
-        let rules = vocabularyCache.preparedRules(for: vocabulary)
         var out = text
-        for (re, replacement) in rules {
-            out = re.stringByReplacingMatches(in: out, range: NSRange(out.startIndex..., in: out),
-                                              withTemplate: replacement)
+        for (re, template) in vocabularyCache.preparedRules(for: vocabulary) {
+            out = re.stringByReplacingMatches(in: out, range: NSRange(out.startIndex..., in: out), withTemplate: template)
         }
         return out
     }
@@ -580,7 +722,10 @@ enum SelfTest {
                 continue
             }
             var start = Date()
-            let raw = SpeechEngine.shared.transcribe(samples, model: model, prompt: "", language: "auto") ?? ""
+            var raw = ""
+            if case .text(let text) = SpeechEngine.shared.transcribeRecording(samples, model: model, prompt: "", language: "auto") {
+                raw = text
+            }
             let asrTime = ms(start)
             start = Date()
             let polished = polishTranscript(raw, appContext: context)
@@ -589,6 +734,22 @@ enum SelfTest {
             print("  polished: \(polished)")
             if raw.isEmpty { failures += 1 }
         }
+
+        print("\nVocabulary:")
+        let vocabulary = "Kubernetes, cooper netties = Kubernetes, create edit -> created_at; redis = Redis\nGGUF"
+        let correctionCases = [
+            ("the cooper netties cluster and the kubernetes one", "the Kubernetes cluster and the Kubernetes one"),
+            ("sort by create edit, then Cooper-Netties.", "sort by created_at, then Kubernetes."),
+            ("redis and gguf, not predisposed", "Redis and GGUF, not predisposed"),
+        ]
+        for (input, expected) in correctionCases {
+            let got = TextCleanup.applyVocabulary(input, vocabulary: vocabulary)
+            print("  \(got == expected ? "ok" : "FAIL")  \(input)  →  \(got)")
+            if got != expected { failures += 1 }
+        }
+        let terms = TextCleanup.vocabularyTerms(vocabulary)
+        print("  \(terms == "Kubernetes, created_at, Redis, GGUF" ? "ok" : "FAIL")  terms: \(terms)")
+        if terms != "Kubernetes, created_at, Redis, GGUF" { failures += 1 }
 
         guard ModelCatalog.cleanup.isInstalled else {
             SpeechEngine.shared.shutdown()

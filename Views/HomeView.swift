@@ -419,8 +419,9 @@ private struct AIPanel: View {
                 }
                 VStack(alignment: .leading, spacing: 6) {
                     SectionLabel(text: "Custom vocabulary")
-                    MonoField(placeholder: "Kubernetes, kubectl, faradaysoft, GGUF, whisper.cpp", text: settings.bind(\.customVocabulary), lines: 2)
-                    Text("Names, acronyms and terms. Their spelling is restored in every transcript; Whisper also hears them as hints.")
+                    MonoField(placeholder: "Kubernetes, GGUF, whisper.cpp, cooper netties = Kubernetes", text: settings.bind(\.customVocabulary), lines: 2)
+                    Text("Names, acronyms and terms. Their spelling is restored in every transcript; Whisper also hears them as hints. "
+                         + "To fix a mis-hearing, write what Voice typed, =, then what you meant.")
                         .font(.mono(10)).foregroundStyle(theme.mutedInk).fixedSize(horizontal: false, vertical: true)
                 }
             }
