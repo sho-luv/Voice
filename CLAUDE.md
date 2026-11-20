@@ -31,7 +31,7 @@ Version 4 is the "(Not Boring)" rework of `~/home/projects/mine/voice` (3.4): th
 | `SpeechEngine.swift` | `ModelCatalog` (pinned URLs + SHA-256), `SpeechEngine` (serial queue, preload, idle unload), `TextCleanup`, `SelfTest` |
 | `engine/VoiceEngine.{h,cpp}` | C wrapper over whisper.cpp (Whisper + Parakeet) and llama.cpp |
 | `engine/build.sh` | Builds `engine/build/libvoiceengine.a` from pinned whisper.cpp/llama.cpp tags against one shared ggml |
-| `build-app.sh` | Engine, then `swiftc`, then `Voice.app`. Used by `install.sh` and `create-dmg.sh` |
+| `build-app.sh` | Engine, then `swiftc`, then `build.noindex/Voice.app` (git-stamped). Used by `install.sh` and `create-dmg.sh` |
 | `icon.svg`, `render-icon.sh` | The retired 3.x vector icon. Don't run it for 4.0: it overwrites `icon.png`/`Voice.icns`. The 4.0 icon comes from `tools/icon` with `--image Resources/Mics/vintage.png` |
 | `voice.sh` | Optional terminal companion (Homebrew `whisper-cli` + `sox`) |
 | `tools/bench/` | `make-sets.py` builds faulty copies of a clean test set, `run.sh` + `wer.py` score `Voice --bench` output. Use it before and after any change to capture, preparation or decoding |
@@ -42,16 +42,18 @@ Version 4 is the "(Not Boring)" rework of `~/home/projects/mine/voice` (3.4): th
 
 ```bash
 ./build-app.sh                                     # engine (cached) + app bundle
-./install.sh                                       # build, sign, install to /Applications
-./Voice.app/Contents/MacOS/Voice --selftest a.wav  # headless: transcribe + cleanup battery
+./install.sh                                       # build, sign, install to /Applications (--dry-run, --force)
+build.noindex/Voice.app/Contents/MacOS/Voice --selftest a.wav  # headless: transcribe + cleanup battery
 tools/bench/run.sh <bench-dir> <label>             # word error rate per test set (see MODELS.md, Audio preparation)
-./Voice.app/Contents/MacOS/Voice -screen home -tab ai -theme hazard -shot x.png   # screenshot QA (see README)
+build.noindex/Voice.app/Contents/MacOS/Voice -screen home -tab ai -theme hazard -shot x.png   # screenshot QA (see README)
 ```
 
 Screenshot QA loop: render every screen (`home` with `-tab`, `onboarding` with `-step`, `look`, `support`, `thanks`, `download`, `overlay*`) in all four themes, tile them with PIL, look, fix, repeat. Don't guess at layout.
 
 CI (`.github/workflows/ci.yml`) typechecks with
 `swiftc -parse-as-library -typecheck Voice.swift SpeechEngine.swift AudioCapture.swift AudioPrep.swift ModelDownload.swift Design/*.swift Views/*.swift Support/*.swift -import-objc-header Voice-Bridging-Header.h -I engine ...`
+
+Builds go to `build.noindex/` (Spotlight skips it, so only `/Applications/Voice.app` shows up). `build-app.sh` stamps the bundle's Info.plist with `VoiceGitCommit` (`-dirty` with uncommitted tracked changes), `VoiceGitBranch` and `VoiceBuildDate`; the menu bar menu shows them as a grey line above Quit. `install.sh` refuses (exit 3, lists the commits) when the installed app's commit isn't HEAD or an ancestor of it, or isn't in this repo, so a build from another branch or clone can't silently replace newer work. `--dry-run` runs only the guard; `--force` skips it; an unstamped installed app warns and is replaced. Install only from this clone. `install.sh` also unregisters other copies from LaunchServices and ends with a "now installed:" line.
 
 Accessibility permission is tied to the code signature. Sign with a stable identity (Developer ID or a local "Voice Dev" cert) or the permission is lost on every rebuild.
 

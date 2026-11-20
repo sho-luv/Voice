@@ -56,14 +56,14 @@ VOICE_UNIVERSAL=1 "${SCRIPT_DIR}/build-app.sh"
 # --- Sign ---
 echo "Signing..."
 if [[ "$CERT" == "-" ]]; then
-    codesign --force --sign - --options runtime --entitlements "${SCRIPT_DIR}/Voice.entitlements" "${SCRIPT_DIR}/Voice.app"
+    codesign --force --sign - --options runtime --entitlements "${SCRIPT_DIR}/Voice.entitlements" "${SCRIPT_DIR}/build.noindex/Voice.app"
     echo "  Ad-hoc signed (not suitable for distribution)"
 else
     codesign --force --sign "${CERT}" --timestamp --options runtime \
         --entitlements "${SCRIPT_DIR}/Voice.entitlements" \
-        "${SCRIPT_DIR}/Voice.app"
+        "${SCRIPT_DIR}/build.noindex/Voice.app"
     echo "  Verifying signature..."
-    codesign --verify --deep --strict --verbose=2 "${SCRIPT_DIR}/Voice.app"
+    codesign --verify --deep --strict --verbose=2 "${SCRIPT_DIR}/build.noindex/Voice.app"
     echo "  Signed with: ${CERT}"
 fi
 
@@ -91,7 +91,7 @@ create-dmg \
     --hide-extension "Voice.app" \
     --hdiutil-quiet \
     "${SCRIPT_DIR}/${DMG_NAME}" \
-    "${SCRIPT_DIR}/Voice.app"
+    "${SCRIPT_DIR}/build.noindex/Voice.app"
 
 # --- Sign the DMG ---
 if [[ "$CERT" != "-" ]]; then

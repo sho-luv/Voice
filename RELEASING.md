@@ -45,19 +45,19 @@ swiftc -parse-as-library -target arm64-apple-macos14.0 -typecheck Voice.swift Sp
 # 2. Engine, headless, on generated speech (English with fillers, plus one other language)
 say -o en.aiff "um so I was thinking we should uh meet tomorrow, no wait, let's meet on Thursday"
 afconvert -f WAVE -d LEI16@16000 -c 1 en.aiff en.wav
-./Voice.app/Contents/MacOS/Voice --selftest en.wav          # expect fillers gone, guardrail "accepted"
-arch -x86_64 ./Voice.app/Contents/MacOS/Voice --selftest en.wav   # Intel slice under Rosetta (universal build)
+build.noindex/Voice.app/Contents/MacOS/Voice --selftest en.wav          # expect fillers gone, guardrail "accepted"
+arch -x86_64 build.noindex/Voice.app/Contents/MacOS/Voice --selftest en.wav   # Intel slice under Rosetta (universal build)
 
 # 3. Universal build, signature, size
-VOICE_UNIVERSAL=1 ./build-app.sh && lipo -info Voice.app/Contents/MacOS/Voice
-codesign --verify --deep --strict Voice.app && du -sh Voice.app     # expect ~12 MB fat, ~7 MB single arch
+VOICE_UNIVERSAL=1 ./build-app.sh && lipo -info build.noindex/Voice.app/Contents/MacOS/Voice
+codesign --verify --deep --strict build.noindex/Voice.app && du -sh build.noindex/Voice.app     # expect ~12 MB fat, ~7 MB single arch
 
 # 4. Every screen, every theme, every mic (look at the contact sheet, don't guess)
 for t in midnight paper electric hazard; do for s in home onboarding look support overlay; do
-  ./Voice.app/Contents/MacOS/Voice -screen $s -theme $t -shot shots/$s-$t.png; done; done
+  build.noindex/Voice.app/Contents/MacOS/Voice -screen $s -theme $t -shot shots/$s-$t.png; done; done
 
 # 5. Live, on the real app (quit the installed copy first; same bundle id)
-./Voice.app/Contents/MacOS/Voice > voice.log 2>&1 &          # NSLog lines land in voice.log
+build.noindex/Voice.app/Contents/MacOS/Voice > voice.log 2>&1 &          # NSLog lines land in voice.log
 swiftc -O tools/fnseq.swift -o build/fnseq                    # synthetic fn presses (terminal needs Accessibility)
 # Route audio away from headphones for the acoustic part: set Voice's mic to the built-in
 # (defaults write com.faradaysoft.voice micDeviceUID -string BuiltInMicrophoneDevice) and speak with

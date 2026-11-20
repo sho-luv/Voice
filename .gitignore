@@ -1,4 +1,5 @@
-# Build output
+# Build output (build-app.sh writes to build.noindex/; the root entries are from older builds)
+build.noindex/
 Voice
 Voice.app/
 _CodeSignature/

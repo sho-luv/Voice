@@ -778,6 +778,15 @@ class InputMonitor {
     }
 }
 
+/// Which build this is, from the keys build-app.sh stamps into the bundle's Info.plist:
+/// "4.0.4 · <commit> · <branch> · built <date>". Unstamped builds show "?".
+let voiceBuildLine: String = {
+    let info = Bundle.main.infoDictionary ?? [:]
+    func value(_ key: String) -> String { info[key] as? String ?? "?" }
+    return "Voice \(value("CFBundleShortVersionString")) · \(value("VoiceGitCommit")) · \(value("VoiceGitBranch"))"
+        + " · built \(value("VoiceBuildDate"))"
+}()
+
 // MARK: - Overlay Window
 
 // Mini preview of the overlay pill shown in Settings
@@ -1720,6 +1729,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         setupItem.target = self
         menu.addItem(setupItem)
         menu.addItem(NSMenuItem.separator())
+        // Which build this is, so a stale or foreign copy is obvious at a glance.
+        let buildItem = NSMenuItem(title: voiceBuildLine, action: nil, keyEquivalent: "")
+        buildItem.isEnabled = false
+        menu.addItem(buildItem)
         let quitItem = NSMenuItem(title: "Quit Voice", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)

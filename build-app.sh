@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# build-app.sh — Compile Voice and assemble an unsigned Voice.app.
+# build-app.sh — Compile Voice and assemble an unsigned build.noindex/Voice.app.
 #
 # Usage:
 #   ./build-app.sh
@@ -12,11 +12,20 @@
 # bundle is just the executable, Info.plist and icon — no helper binaries,
 # no dylibs. Models are downloaded (and SHA-256 verified) by the app on first
 # launch unless VOICE_BUNDLE_MODELS=1.
+#
+# The output goes to build.noindex/ so Spotlight lists only the installed copy
+# in /Applications. The bundle's Info.plist (never the tracked Info.plist) is
+# stamped with VoiceGitCommit ("-dirty" when tracked files had uncommitted
+# changes), VoiceGitBranch and VoiceBuildDate; install.sh's regression guard and
+# the menu bar menu read them. Stamping happens here, before the caller signs.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-APP_DIR="${SCRIPT_DIR}/Voice.app/Contents"
+BUILD_DIR="${SCRIPT_DIR}/build.noindex"
+APP_BUNDLE="${BUILD_DIR}/Voice.app"
+APP_DIR="${APP_BUNDLE}/Contents"
+BINARY="${BUILD_DIR}/Voice"
 MODEL_DIR="${HOME}/Library/Application Support/Voice/Models"
 MACOS_MIN="14.0"
 
@@ -58,24 +67,36 @@ compile_arch() { # arch outfile
         -Xlinker -dead_strip
 }
 
+mkdir -p "${BUILD_DIR}"
 echo "Compiling Voice (${ARCHS[*]})..."
 if [[ "${#ARCHS[@]}" -eq 1 ]]; then
-    compile_arch "${ARCHS[0]}" "${SCRIPT_DIR}/Voice"
+    compile_arch "${ARCHS[0]}" "${BINARY}"
 else
     slices=()
     for arch in "${ARCHS[@]}"; do
-        compile_arch "${arch}" "${SCRIPT_DIR}/Voice-${arch}"
-        slices+=("${SCRIPT_DIR}/Voice-${arch}")
+        compile_arch "${arch}" "${BINARY}-${arch}"
+        slices+=("${BINARY}-${arch}")
     done
-    lipo -create -output "${SCRIPT_DIR}/Voice" "${slices[@]}"
+    lipo -create -output "${BINARY}" "${slices[@]}"
     rm -f "${slices[@]}"
 fi
 
 echo "Creating app bundle..."
-rm -rf "${SCRIPT_DIR}/Voice.app"
+rm -rf "${APP_BUNDLE}"
 mkdir -p "${APP_DIR}/MacOS" "${APP_DIR}/Resources"
-cp "${SCRIPT_DIR}/Voice" "${APP_DIR}/MacOS/Voice"
+cp "${BINARY}" "${APP_DIR}/MacOS/Voice"
 cp "${SCRIPT_DIR}/Info.plist" "${APP_DIR}/Info.plist"
+
+# Stamp where this build came from (see the header). Before signing, which the caller does.
+PLIST="${APP_DIR}/Info.plist"
+GIT_COMMIT="$(git -C "${SCRIPT_DIR}" rev-parse --short HEAD)"
+git -C "${SCRIPT_DIR}" diff --quiet HEAD -- || GIT_COMMIT="${GIT_COMMIT}-dirty"
+GIT_BRANCH="$(git -C "${SCRIPT_DIR}" rev-parse --abbrev-ref HEAD)"
+BUILD_DATE="$(date '+%Y-%m-%d %H:%M:%S %z')"
+/usr/libexec/PlistBuddy -c "Add :VoiceGitCommit string ${GIT_COMMIT}" "${PLIST}"
+/usr/libexec/PlistBuddy -c "Add :VoiceGitBranch string ${GIT_BRANCH}" "${PLIST}"
+/usr/libexec/PlistBuddy -c "Add :VoiceBuildDate string ${BUILD_DATE}" "${PLIST}"
+echo "Stamped build ${GIT_COMMIT} · ${GIT_BRANCH} · ${BUILD_DATE}"
 cp "${SCRIPT_DIR}/Voice.icns" "${APP_DIR}/Resources/Voice.icns"
 # Designed mic renders (MicModel.renderImage); styles without one are built from primitives.
 cp -R "${SCRIPT_DIR}/Resources/Mics" "${APP_DIR}/Resources/Mics"
@@ -103,4 +124,4 @@ if [[ "${VOICE_BUNDLE_MODELS:-0}" == "1" ]]; then
     done
 fi
 
-echo "Built ${SCRIPT_DIR}/Voice.app ($(du -sh "${SCRIPT_DIR}/Voice.app" | cut -f1))"
+echo "Built ${APP_BUNDLE} ($(du -sh "${APP_BUNDLE}" | cut -f1))"

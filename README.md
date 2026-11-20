@@ -29,6 +29,8 @@ That's it. The installer builds and signs the app, installs it to `/Applications
 1. **Accessibility** -- needed to detect the hotkey and inject text
 2. **Microphone** -- needed to record audio
 
+Reinstalling over an existing copy is guarded: each build is stamped with its git commit (shown greyed in the menu bar menu), and `install.sh` stops with exit code 3 if the installed Voice was built from a commit this checkout doesn't contain, listing the commits that would be lost. `./install.sh --dry-run` runs only that check; `--force` replaces the installed copy anyway.
+
 ## Usage
 
 | Shortcut | Action |
@@ -187,20 +189,20 @@ If you prefer to build without the installer:
 brew install cmake
 
 # Build the static speech engine (first run clones pinned whisper.cpp/llama.cpp, ~1 min),
-# compile the app, and assemble Voice.app
+# compile the app, and assemble build.noindex/Voice.app (stamped with its git commit)
 ./build-app.sh
 
 # Sign (see Code Signing section below)
-codesign --force --sign - --options runtime --entitlements Voice.entitlements Voice.app
+codesign --force --sign - --options runtime --entitlements Voice.entitlements build.noindex/Voice.app
 
 # Run
-open Voice.app
+open build.noindex/Voice.app
 ```
 
 To look at a screen without going through the app, the build has a preview mode that opens one window (the running copy of Voice can stay up) and can save a screenshot:
 
 ```bash
-./Voice.app/Contents/MacOS/Voice -screen home -tab audio -theme paper -shot home.png
+build.noindex/Voice.app/Contents/MacOS/Voice -screen home -tab audio -theme paper -shot home.png
 # screens: home, onboarding (-step 0..3), look, support, thanks, download, overlay, overlay-popo, overlay-done, overlay-error
 # -mic stage|vintage|ribbon|podcast picks the hero for the shot
 ```
@@ -210,7 +212,7 @@ The app icon is the vintage mic render on a charcoal tile: `swiftc -O Design/Her
 To check the engine without the UI, run the headless self-test. It loads the installed models, transcribes the given WAV files (16 kHz mono PCM), and runs the AI cleanup test battery:
 
 ```bash
-./Voice.app/Contents/MacOS/Voice --selftest recording.wav
+build.noindex/Voice.app/Contents/MacOS/Voice --selftest recording.wav
 ```
 
 ## Code Signing & Accessibility Permissions
